@@ -20,10 +20,43 @@ def now_utc():
     return datetime.now(timezone.utc).isoformat()
 
 
+def ends_with_newline(path):
+    """True if the file is empty/missing or its last character is a newline."""
+    if not path.exists() or path.stat().st_size == 0:
+        return True
+    with open(path, "rb") as f:
+        f.seek(-1, 2)                         # jump to the very last byte of the file
+        return f.read(1) == b"\n"
+
+
 def save_to_log(record):
     LOG_FILE.parent.mkdir(exist_ok=True)      # create the logs/ folder if it's missing
+    needs_newline = not ends_with_newline(LOG_FILE)
     with open(LOG_FILE, "a", encoding="utf-8") as f:
+        if needs_newline:                     # a crash left a half-written line: close it off
+            f.write("\n")
         f.write(json.dumps(record) + "\n")
+
+
+def label_key(labels):
+    """Turn a labels dict into one string, so it can be stored in a set and compared."""
+    return json.dumps(labels, sort_keys=True)
+
+
+def load_done_keys():
+    """Read the log once and return the label keys that already have a successful answer."""
+    done = set()
+    if not LOG_FILE.exists():                 # no log yet: nothing is done
+        return done
+    with open(LOG_FILE, encoding="utf-8") as f:
+        for line in f:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:      # half-written line from a crash: ignore it
+                continue
+            if record.get("ok") and "key" in record:
+                done.add(record["key"])
+    return done
 
 
 def is_retryable(error):
@@ -73,6 +106,7 @@ def call_claude(question, labels, context=None, cache_context=False,
             latency = time.perf_counter() - start
             save_to_log({
                 "time": now_utc(),
+                "key": label_key(labels),
                 **labels,
                 "model": MODEL,
                 "attempt": attempt,
@@ -93,6 +127,7 @@ def call_claude(question, labels, context=None, cache_context=False,
         answer = "".join(block.text for block in response.content if block.type == "text")
         record = {
             "time": now_utc(),
+            "key": label_key(labels),
             **labels,
             "model": MODEL,
             "attempt": attempt,
