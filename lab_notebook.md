@@ -1,6 +1,6 @@
 # Lab notebook: Long Context vs. Retrieval, at Matched Cost
 
-## Part 1: logging and cost model
+## Part 1: Logging and cost model
 
 ### Decisions
 
@@ -64,6 +64,47 @@ At Q = 1 caching is worse than no cache; from Q = 2 it is cheaper, approaching 0
 | `check_cost.py` | Prices every call in the log and totals it |
 | `tutorial/` | Learning and demo scripts (`demo_*.py` make real API calls) |
 
-### Next
+## Datasets chosen: Weeks 1-2 complete
 
-Step 4: download MuSiQue-Ans and 2WikiMultihopQA, inspect real questions, and build the shared corpora at 16K / 64K / 256K / 512K tokens.
+### Decision
+
+- **Primary: MuSiQue-Ans, dev split**, all 2,417 questions eligible (all answerable).
+- **Secondary: 2WikiMultihopQA, dev split, only `compositional` and `inference` questions** (5,236 + 1,549 = 6,785 eligible).
+  - Excluded `comparison` and `bridge_comparison`: these name both candidate answers in the question ("X or Y?"), so guessing gets about 50% without reading anything. That would inflate both systems' accuracy and blur the difference between them.
+  - The two kept types are fact chains, like MuSiQue, so both datasets measure the same skill.
+- Train splits are not used (we don't train models).
+
+### What the data looks like
+
+| | MuSiQue-Ans dev | 2Wiki dev |
+|---|---|---|
+| Questions | 2,417 | 12,576 (6,785 kept) |
+| Paragraphs per question | 17-20 | 10 |
+| Gold paragraphs per question | = number of hops | 2 (4 for bridge_comparison, excluded) |
+| Hops | 2: 1,252 / 3: 760 / 4: 405 | n/a |
+| Avg words per paragraph | 83 (max 299) | 60 (max 1,687) |
+| Unique paragraphs | 21,100 of 48,315 (56% repeats) | 54,957 of 125,760 |
+| Words in unique paragraphs | 1.65M (about 2.1M tokens, rough) | 3.95M |
+| Gold titles missing from context | n/a | 0 |
+
+- **Formats differ.** MuSiQue: JSON Lines; each paragraph has `paragraph_text` and an `is_supporting` flag; `question_decomposition` lists the hops, with `paragraph_support_idx` naming the gold paragraph for each hop (enables per-hop retrieval-miss analysis). 2Wiki: one JSON list; each paragraph is `[title, [sentences]]`; gold paragraphs are found by matching titles in `supporting_facts`.
+- **Enough text:** MuSiQue alone has about 4x the unique text a 512K-token corpus needs.
+- **Duplicates are common**, because MuSiQue chains share Wikipedia paragraphs and distractors. Corpus building must remove them.
+- **One outlier paragraph** in 2Wiki has 1,687 words; keep it in mind when chunking for retrieval.
+
+### Data sources (data/ is not committed; download these)
+
+| File to keep in `data/raw/` | Source | License |
+|---|---|---|
+| `musique_ans_v1.0_dev.jsonl` | Google Drive zip linked from https://github.com/StonyBrookNLP/musique (file `data/musique_ans_v1.0_dev.jsonl` inside) | CC BY 4.0 |
+| `2wiki_dev.json` (renamed from `dev.json`) | `data_ids_april7.zip` linked from https://github.com/Alab-NII/2wikimultihop (version with fixed sentence segmentation) | Apache-2.0 (repo) |
+
+Later, for scoring 2Wiki: `id_aliases.json` from the same 2Wiki zip lists alternative answer spellings.
+
+## Status
+
+Weeks 1-2 of the proposal timeline are complete: model chosen, repo, per-call logging, frozen price sheet, cost model with tests, datasets chosen and inspected.
+
+### Next (Weeks 3-5)
+
+Step 4b: convert both datasets to one common format and build the shared corpora at 16K / 64K / 256K / 512K tokens, with exact token counts.
