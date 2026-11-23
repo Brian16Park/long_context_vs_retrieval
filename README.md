@@ -67,7 +67,7 @@ Run these from the repo folder:
 
 ```bash
 pytest                          # cost-model tests; free, no API calls. Expect "7 passed"
-python dataset_stats.py         # dataset counts; should match the table in lab_notebook.md
+python python -m scripts.dataset_stats         # dataset counts; should match the table in lab_notebook.md
 python -m tutorial.demo_llm     # one real API call pair; costs under $0.001
 ```
 
@@ -81,8 +81,9 @@ lcvr/                 project code
 tests/                pytest checks (no API calls)
 tutorial/             learning and demo scripts; demo_*.py make real API calls
 lab_notebook.md       decisions, findings, data sources
-check_cost.py         prices every call in logs/calls.jsonl and totals it
-dataset_stats.py      counts questions, hops and text in each dataset
+scripts/              things you run: python -m scripts.<name>
+  check_cost.py       prices every call in logs/calls.jsonl and totals it
+  dataset_stats.py    counts questions, hops and text in each dataset
 data/                 datasets (not in git)
 logs/                 call logs (not in git)
 ```
