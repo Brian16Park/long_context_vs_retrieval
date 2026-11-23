@@ -21,8 +21,8 @@ You need Python 3.11 or newer, Git, and an Anthropic API key with credits ([Clau
 Windows (PowerShell):
 
 ```powershell
-git clone https://github.com/Brian16Park/<long_context_vs_retrieval>.git
-cd <repo>
+git clone https://github.com/Brian16Park/long_context_vs_retrieval.git
+cd long_context_vs_retrieval
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
@@ -33,8 +33,8 @@ If activation fails with "running scripts is disabled", run `Set-ExecutionPolicy
 macOS / Linux:
 
 ```bash
-git clone https://github.com/Brian16Park/<long_context_vs_retrieval>.git
-cd <repo>
+git clone https://github.com/Brian16Park/long_context_vs_retrieval.git
+cd long_context_vs_retrieval
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -67,7 +67,7 @@ Run these from the repo folder:
 
 ```bash
 pytest                          # cost-model tests; free, no API calls. Expect "7 passed"
-python dataset_stats.py         # dataset counts; should match the table in notes/lab_notebook.md
+python dataset_stats.py         # dataset counts; should match the table in lab_notebook.md
 python -m tutorial.demo_llm     # one real API call pair; costs under $0.001
 ```
 
@@ -80,7 +80,7 @@ lcvr/                 project code
   cost.py             call_cost(): dollar cost of one logged call
 tests/                pytest checks (no API calls)
 tutorial/             learning and demo scripts; demo_*.py make real API calls
-notes/lab_notebook.md decisions, findings, data sources
+lab_notebook.md       decisions, findings, data sources
 check_cost.py         prices every call in logs/calls.jsonl and totals it
 dataset_stats.py      counts questions, hops and text in each dataset
 data/                 datasets (not in git)
