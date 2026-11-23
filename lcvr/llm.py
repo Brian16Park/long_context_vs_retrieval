@@ -67,6 +67,20 @@ def is_retryable(error):
     return False
 
 
+def count_tokens(text):
+    """Exact input tokens for one user message holding `text`, under our model's tokenizer.
+
+    Token counting is free, so there's nothing billed to log, and we let the SDK
+    retry rate-limit errors on its own.
+    """
+    response = client.with_options(max_retries=8).messages.count_tokens(
+        model=MODEL,
+        thinking={"type": "disabled"},           # same settings as our real calls
+        messages=[{"role": "user", "content": text}],
+    )
+    return response.input_tokens
+
+
 def call_claude(question, labels, context=None, cache_context=False,
                 system=None, max_tokens=100, max_attempts=8):
     """Ask Claude one question. Every attempt is logged with `labels`.
