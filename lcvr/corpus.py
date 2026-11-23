@@ -200,6 +200,21 @@ def build_corpora(dataset, seed, questions, paragraphs_by_pid, est, count_tokens
     return corpora
 
 
+def pick_questions(corpora, size, n=None):
+    """The first n questions at one corpus size (all if n is None), corpus by corpus in file
+    order, as [(corpus, its chosen question IDs)]. Every system picks questions with this,
+    so they all answer the same questions in the same corpora."""
+    picked = []
+    for corpus in corpora:
+        if corpus["target_tokens"] != size:
+            continue
+        qids = corpus["qids"] if n is None else corpus["qids"][:n - sum(len(q) for _, q in picked)]
+        if not qids:
+            break
+        picked.append((corpus, qids))
+    return picked
+
+
 # ---------------- checks ----------------
 
 def check_corpora(corpora, questions_by_qid):

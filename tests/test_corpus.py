@@ -2,7 +2,7 @@
 import random
 
 from lcvr.corpus import (TOLERANCE, build_corpora, check_corpora, estimate_sizes, fit_corpus,
-                         group_questions, pick_filler, render_corpus)
+                         group_questions, pick_filler, pick_questions, render_corpus)
 
 
 def test_render_format():
@@ -103,3 +103,13 @@ def test_hard_to_estimate_text_still_fits():
     corpora = build_corpora("fake", 0, questions, {p["pid"]: p for p in paragraphs}, est,
                             fake_count_tokens, sizes=(1500, 6000), n_questions=30)
     assert check_corpora(corpora, {q["qid"]: q for q in questions}) == []
+
+
+def test_pick_questions_takes_the_first_n_corpus_by_corpus():
+    corpora = [{"corpus_id": "a", "target_tokens": 16000, "qids": ["q1", "q2", "q3"]},
+               {"corpus_id": "b", "target_tokens": 64000, "qids": ["q9"]},
+               {"corpus_id": "c", "target_tokens": 16000, "qids": ["q4", "q5"]},
+               {"corpus_id": "d", "target_tokens": 16000, "qids": ["q6"]}]
+    picked = pick_questions(corpora, 16000, n=4)
+    assert [(c["corpus_id"], q) for c, q in picked] == [("a", ["q1", "q2", "q3"]), ("c", ["q4"])]
+    assert len(pick_questions(corpora, 16000)) == 3                      # n=None: every corpus of that size

@@ -1,9 +1,10 @@
-"""Step 6a: embed every paragraph and every question once, for retrieval. Free: runs on your CPU.
+"""Step 6a: embed every paragraph and every question once, for retrieval. Free: runs locally
+(on the GPU if PyTorch can use one, otherwise the CPU).
 
 Run from the repo folder:  python -m scripts.embed
 Writes to data/processed/embeddings/: <dataset>_paragraphs.npz, <dataset>_questions.npz, and
-<dataset>_timing.json (CPU time, for the cost model). A dataset that already has its timing
-file is skipped. The first run downloads the embedding model (about 130 MB).
+<dataset>_timing.json (time and device, for the cost model). A dataset that already has its
+timing file is skipped. The first run downloads the embedding model (about 130 MB).
 """
 import json
 import time
@@ -13,7 +14,8 @@ from statistics import mean
 
 from lcvr.corpus import render_paragraph
 from lcvr.data import read_jsonl
-from lcvr.rag import EMBEDDING_MODEL, QUERY_PROMPT, embed, load_embedder, save_vectors, top_k
+from lcvr.rag import (EMBEDDING_MODEL, QUERY_PROMPT, describe_device, embed, load_embedder,
+                      save_vectors, top_k)
 
 PROCESSED = Path("data/processed")
 OUT = PROCESSED / "embeddings"
@@ -59,7 +61,7 @@ for dataset in todo:
     save_vectors(OUT / f"{dataset}_questions.npz", [q["qid"] for q in questions], q_vectors)
 
     timing = {
-        "model": EMBEDDING_MODEL, "date": date.today().isoformat(),
+        "model": EMBEDDING_MODEL, "date": date.today().isoformat(), "device": describe_device(),
         "paragraphs": len(paragraphs), "paragraph_chars": sum(len(t) for t in texts),
         "paragraph_cpu_seconds": round(p_cpu, 1), "paragraph_wall_seconds": round(p_wall, 1),
         "questions": len(questions),

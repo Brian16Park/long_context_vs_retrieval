@@ -11,6 +11,7 @@ to logs/calls.jsonl, so running the same command again skips questions already a
 import argparse
 from statistics import mean
 
+from lcvr.corpus import pick_questions
 from lcvr.cost import call_cost, lc_estimate
 from lcvr.data import read_jsonl
 from lcvr.lc import ask_corpus
@@ -33,14 +34,10 @@ corpora = read_jsonl(f"data/processed/corpora/{args.dataset}_seed{args.seed}.jso
 # ---------------- plan: which corpora, and how many of each one's questions ----------------
 plan = []
 for size in args.size:
-    remaining = args.questions
-    for corpus in corpora:
-        if corpus["target_tokens"] == size and remaining > 0:
-            n = min(remaining, len(corpus["qids"]))
-            plan.append((corpus, n))
-            remaining -= n
-    if remaining == args.questions:
+    picked = pick_questions(corpora, size, args.questions)     # the same questions every system uses
+    if not picked:
         raise SystemExit(f"No corpora of size {size} for {args.dataset} seed {args.seed}.")
+    plan += [(corpus, len(qids)) for corpus, qids in picked]
 
 estimate = sum(lc_estimate(corpus["tokens"], n) for corpus, n in plan)
 print(f"{len(plan)} corpora, {sum(n for _, n in plan)} questions. Estimated cost: ${estimate:.4f}")
