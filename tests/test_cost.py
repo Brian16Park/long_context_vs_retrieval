@@ -1,11 +1,11 @@
-"""Automated checks for call_cost(). Run with:  pytest
+"""Automated checks for call_cost() and lc_estimate(). Run with:  pytest
 
 Each expected value was worked out by hand from the price sheet,
 so these tests check the code against arithmetic we understand.
 """
 import pytest
 
-from lcvr.cost import call_cost
+from lcvr.cost import call_cost, lc_estimate
 
 def make_record(input_tokens=0, cache_write=0, cache_read=0, output=0, ok=True):
     """Build a fake log line with just the fields call_cost() needs."""
@@ -58,3 +58,13 @@ def test_long_context_512k_cache_read():
     # 30 x 0.50 + 512,000 x 0.05 + 10 x 2.50, all per million
     record = make_record(input_tokens=30, cache_read=512_000, output=10)
     assert call_cost(record) == pytest.approx(0.02564)
+
+
+def test_lc_estimate_short_corpus():
+    # 16,000 x (0.125 + 3 x 0.01) per million: one write, three reads
+    assert lc_estimate(16_000, 4) == pytest.approx(0.00248)
+
+
+def test_lc_estimate_long_corpus():
+    # 256,000 x (0.625 + 19 x 0.05) per million: one write, 19 reads at the long-prompt prices
+    assert lc_estimate(256_000, 20) == pytest.approx(0.4032)

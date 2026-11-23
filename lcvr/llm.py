@@ -43,20 +43,23 @@ def label_key(labels):
     return json.dumps(labels, sort_keys=True)
 
 
-def load_done_keys():
-    """Read the log once and return the label keys that already have a successful answer."""
-    done = set()
-    if not LOG_FILE.exists():                 # no log yet: nothing is done
-        return done
+def read_log():
+    """Every complete record in the log, oldest first."""
+    records = []
+    if not LOG_FILE.exists():                 # no log yet
+        return records
     with open(LOG_FILE, encoding="utf-8") as f:
         for line in f:
             try:
-                record = json.loads(line)
+                records.append(json.loads(line))
             except json.JSONDecodeError:      # half-written line from a crash: ignore it
                 continue
-            if record.get("ok") and "key" in record:
-                done.add(record["key"])
-    return done
+    return records
+
+
+def load_done_keys():
+    """Read the log once and return the label keys that already have a successful answer."""
+    return {r["key"] for r in read_log() if r.get("ok") and "key" in r}
 
 
 def is_retryable(error):

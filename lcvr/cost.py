@@ -26,3 +26,11 @@ def call_cost(record, prices=HAIKU_5_5):
                + record["cache_read_tokens"] * p["cache_read"]
                + record["output_tokens"] * p["output"]) / 1_000_000
     return dollars
+
+
+def lc_estimate(corpus_tokens, n_questions, prices=HAIKU_5_5):
+    """Rough cost of asking n questions against one cached corpus, before running it:
+    one cache write, then n - 1 cache reads. Leaves out the few question and answer tokens."""
+    tier = "long" if corpus_tokens > prices["long_prompt_threshold"] else "short"
+    p = prices[tier]
+    return corpus_tokens * (p["cache_write_5m"] + (n_questions - 1) * p["cache_read"]) / 1_000_000
