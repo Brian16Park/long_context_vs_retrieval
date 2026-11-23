@@ -161,10 +161,69 @@ At Q = 1 caching is worse than no cache; from Q = 2 it is cheaper, approaching 0
 | `scripts/build_corpora.py` | Builds and checks all corpora (resumable: existing files are skipped) |
 | `tests/test_data.py`, `tests/test_corpus.py` | 16 new checks with made-up data and a fake token counter (23 in total) |
 
+## Steps 4c-6 and the pilot (2026-11-22): scoring, both systems, baseline
+
+### Decisions
+
+- **Scoring** (`lcvr/scoring.py`): exact match (EM) and token F1 with SQuAD normalization (lowercase; drop punctuation and a/an/the), best over all accepted answers: the same rules as the official MuSiQue and 2Wiki evaluators. `clean_prediction()` takes the reply's first line and strips an "Answer:" label.
+- **One prompt for every system** (`lcvr/prompts.py`): instructions in the system prompt, then documents, then the question, and a 50-token answer cap. The instructions ask for the answer alone ("a short phrase such as a name, a date or a number, with no explanation") and a best guess when the documents don't settle it. The two systems differ only in which documents they see.
+- **Long context** (`lcvr/lc.py`): the whole corpus as the document block, with a cache marker after it; a corpus's questions are asked back to back, so the first call writes the cache and the rest read it.
+- **RAG** (`lcvr/rag.py`): chunks are paragraphs (the gold labels' unit, so recall@k is exact). Embeddings: `BAAI/bge-small-en-v1.5`, with BGE's search instruction in front of questions. Exact search in numpy. The top 100 candidates are reordered by the reranker `cross-encoder/ms-marco-MiniLM-L6-v2`. Every paragraph and question is embedded once and reused. 10 settings: top-k 5, 10, 20, 40, 80, each with and without the reranker; documents go in best first, uncached.
+- **Closed-book baseline:** each question with no documents, to measure what the model already knows.
+- **Local models run on the GPU** (RTX 3060 Ti, CUDA build of PyTorch 2.15 for Python 3.15). The timing records note the device, and the cost model will price GPU time at a cloud GPU rate.
+- **All systems answer the same questions:** `pick_questions()` takes the first n at a size, corpus by corpus.
+- **Runs show a cost estimate and wait for "y"**, resume after a crash, and stop at the first error that retries can't fix (e.g. no credit), cancelling queued calls.
+
+### Findings
+
+**1. The GPU is about 15x faster.** Embedding every paragraph and question: CPU 434 s (MuSiQue) and 469 s (2Wiki); GPU 29 s and 38 s. The vectors match, and so does the sanity check: 67% (MuSiQue) and 87% (2Wiki) of gold paragraphs rank in the top 5 of their question's own paragraphs, against 25% and 50% for random order.
+
+**2. Retrieval gets steadily harder as the corpus grows.** Share of gold paragraphs in the top 20 (all 300 questions per size, mean of 3 seeds, dense -> reranked):
+
+| Corpus | MuSiQue | 2Wiki |
+|---|---|---|
+| 16K | 0.94 -> 0.91 | 0.96 -> 0.96 |
+| 64K | 0.87 -> 0.86 | 0.89 -> 0.92 |
+| 256K | 0.79 -> 0.80 | 0.82 -> 0.84 |
+| 512K | 0.74 -> 0.77 | 0.77 -> 0.80 |
+
+At 512K even the top 80 miss 11-13% of gold paragraphs. Seeds agree within a few points.
+
+**3. The reranker only pays off in big corpora.** It slightly lowers recall at 16K and raises it at 256K-512K. A likely reason: it was trained to rank by direct relevance to the question as written, and MuSiQue's later-hop paragraphs are about an entity the question never names. It helps once there are many distractors to filter.
+
+**4. The cost model predicts the bill within about 1%.** Estimates (made before running, from measured corpus sizes and the frozen price sheet) against logged costs: long context +0.6% (both datasets), RAG +0.3% (MuSiQue) and -1.3% (2Wiki), against the proposal's 5% bar. At 256K, one cache write then 19 reads, as designed. The pilot cost $1.43 in total.
+
+**5. Pilot accuracy is low, and more text makes it worse** (20 questions per size; the 16K and 256K questions differ, so compare systems within a size):
+
+| EM / F1 | MuSiQue 16K | MuSiQue 256K | 2Wiki 16K | 2Wiki 256K |
+|---|---|---|---|---|
+| Closed book | 0.00 / 0.04 (all pilot questions) | | 0.08 / 0.13 (all pilot questions) | |
+| Long context | 0.05 / 0.24 | 0.05 / 0.12 | 0.30 / 0.40 | 0.15 / 0.22 |
+| RAG, top 5 | 0.05 / 0.20 | 0.15 / 0.22 | 0.65 / 0.66 | 0.30 / 0.43 |
+| RAG, top 80 | 0.05 / 0.20 | 0.15 / 0.24 | 0.30 / 0.48 | 0.25 / 0.39 |
+
+(RAG rows: without the reranker.) On 2Wiki, fewer paragraphs mean better answers: RAG with 5 beats RAG with 80, which roughly matches long context at 16K. MuSiQue sits near the floor for every system. The smoke test's replies were short phrases, as asked, so the likelier cause is answering in one step, with no room to work through 2-4 hops. **Open decision:** keep answer-only, or let both systems reason briefly before answering (the extra output tokens are billed and counted in the matched cost).
+
+### Code added
+
+| File | Purpose |
+|---|---|
+| `lcvr/scoring.py` | EM and F1, best over accepted answers |
+| `lcvr/prompts.py` | The shared instructions and question format |
+| `lcvr/lc.py` | Long context: ask a corpus's questions with the corpus cached |
+| `lcvr/rag.py` | RAG: embeddings, search, reranking, recall, RAG answers |
+| `lcvr/corpus.py` | New `pick_questions()`, shared by every system |
+| `lcvr/llm.py` | New `read_log()`; log writes are safe when calls run in parallel |
+| `lcvr/cost.py` | New `lc_estimate()` and `call_estimate()` for pre-run estimates |
+| `scripts/embed.py`, `scripts/rank.py` | Embeddings once; dense and reranked top 100 per question and corpus |
+| `scripts/run_lc.py`, `scripts/run_rag.py`, `scripts/run_closed_book.py` | Run each system (estimate, confirm, run, summary) |
+| `scripts/show_answers.py` | A run's replies next to the gold answers |
+| `tests/` | 24 new checks (47 in total), with fake models: no downloads or API calls |
+
 ## Status
 
-Weeks 1-2 are complete, and step 4b of Weeks 3-5: both datasets are in one format, and all corpora are built and checked.
+Weeks 1-5 are complete: data, corpora, scoring, both systems, the closed-book baseline, all rankings, and the 20-question pilot. The pipelines score answers end to end, and the cost model matches the bill.
 
-### Next (rest of Weeks 3-5)
+### Next
 
-Scoring (exact match and F1 over all accepted answers), the long-context pipeline, the RAG pipeline, the closed-book baseline, then the 20-question pilot at 16K and 256K to check predicted cost against the real bill.
+Decide the answer format (open decision in finding 5), then the core sweep: every corpus size, 300 questions per size, 3 seeds, both datasets.

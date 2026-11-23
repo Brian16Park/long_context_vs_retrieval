@@ -10,7 +10,7 @@ We compare two ways of answering questions about a document collection with an L
 
 Both use the same model (Claude Haiku 5.5). We compare them at **equal dollar cost per question**, across corpus size and query volume, on multi-hop questions from MuSiQue and 2WikiMultihopQA.
 
-**Status:** Weeks 1-2 done (model, logging, price sheet, cost model, dataset choice), and the shared corpora are built (step 4b). Next: scoring, the two pipelines, and a 20-question pilot. Decisions and findings so far are in [`lab_notebook.md`](lab_notebook.md).
+**Status:** Weeks 1-5 done: data, corpora, scoring, both systems, a closed-book baseline, and a 20-question pilot (the cost model matched the bill within about 1%). Next: the core sweep. Decisions and findings so far are in [`lab_notebook.md`](lab_notebook.md).
 
 ## Setup
 
@@ -29,6 +29,16 @@ pip install -r requirements.txt
 ```
 
 If activation fails with "running scripts is disabled", run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, then activate again.
+
+**Optional, NVIDIA GPU:** the embedding model and reranker run about 15x faster on a GPU. `requirements.txt` installs PyTorch's CPU build; to swap in the CUDA build (needs a driver supporting CUDA 13.2; check with `nvidia-smi`):
+
+```powershell
+pip uninstall -y torch
+pip install torch==2.15.0 --index-url https://download.pytorch.org/whl/cu132
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"   # 2.15.0+cu132 True
+```
+
+The code uses the GPU automatically when PyTorch can see one, and the CPU otherwise.
 
 macOS / Linux:
 
@@ -67,19 +77,35 @@ Delete the zips afterwards; we only use the dev splits.
 Run these from the repo folder:
 
 ```bash
-pytest                          # free, no API calls. Expect "23 passed"
+pytest                          # free, no API calls. Expect "47 passed"
 python -m scripts.dataset_stats  # dataset counts; should match the table in lab_notebook.md
 python -m tutorial.demo_llm     # one real API call pair; costs under $0.001
 ```
 
-### 5. Build the processed data and the corpora
+### 5. Build the processed data, corpora, embeddings and rankings
 
-```bash
-python -m scripts.convert_data   # both datasets -> data/processed/ (seconds, free)
-python -m scripts.build_corpora  # all corpora -> data/processed/corpora/ (minutes; free token counting only)
+All free (token counting and local models only). Each script skips work that's already done, so after a crash just run it again.
+
+```powershell
+python -m scripts.convert_data   # both datasets -> data/processed/ (seconds)
+python -m scripts.build_corpora  # every corpus -> data/processed/corpora/ (minutes)
+python -m scripts.embed          # every paragraph and question -> data/processed/embeddings/ (about 1 min on a GPU, 15 on a CPU)
+foreach ($d in "musique", "2wiki") { foreach ($s in 0, 1, 2) { python -m scripts.rank --dataset $d --seed $s } }
 ```
 
-`build_corpora` skips files that already exist, so after a crash just run it again. `scripts/calibrate_tokens.py` measured the characters-per-token ratios used by the corpus builder; you don't need to rerun it.
+`embed` and `rank` download two small models the first time (about 220 MB). `scripts/calibrate_tokens.py` measured the characters-per-token ratios the corpus builder uses; you don't need to rerun it.
+
+## Running the systems
+
+Each run script shows a cost estimate and waits for `y` before spending anything, logs every call to `logs/calls.jsonl`, and skips calls already answered when run again. The pilot, for example:
+
+```powershell
+python -m scripts.run_lc --run pilot --dataset musique --size 16000 256000 --questions 20
+python -m scripts.run_rag --run pilot --dataset musique --size 16000 256000 --questions 20
+python -m scripts.run_closed_book --run pilot --dataset musique --size 16000 256000 --questions 20
+python -m scripts.show_answers pilot     # replies next to the gold answers
+python -m scripts.check_cost             # total cost of everything logged
+```
 
 ## Repo layout
 
@@ -88,13 +114,23 @@ lcvr/                 project code
   llm.py              call_claude(): every model call goes through here (caching, retries, logging);
                       count_tokens(): exact token count of a text (free)
   prices.py           frozen price sheet (date and source inside)
-  cost.py             call_cost(): dollar cost of one logged call
+  cost.py             call_cost(): dollar cost of one logged call; estimates before a run
   data.py             converts both datasets to one common format
-  corpus.py           how paragraphs look in a prompt; builds and checks the corpora
+  corpus.py           how paragraphs look in a prompt; builds and checks the corpora; pick_questions()
+  scoring.py          exact match and F1, as the official evaluators score them
+  prompts.py          the instructions every system shares
+  lc.py               long context: the whole corpus, cached, then each question
+  rag.py              RAG: embeddings, search, reranking, then the top k paragraphs and the question
 scripts/              things you run: python -m scripts.<name>
   convert_data.py     data/raw/ -> data/processed/
   calibrate_tokens.py measures characters per token for each dataset
   build_corpora.py    builds every corpus (2 datasets x 3 seeds x 4 sizes)
+  embed.py            embeds every paragraph and question once
+  rank.py             dense and reranked top 100 for every question in its corpus; prints recall@k
+  run_lc.py           runs long context
+  run_rag.py          runs RAG (10 settings: top-k 5-80, with and without the reranker)
+  run_closed_book.py  runs the no-documents baseline
+  show_answers.py     a run's replies next to the gold answers
   check_cost.py       prices every call in logs/calls.jsonl and totals it
   dataset_stats.py    counts questions, hops and text in each dataset
 tests/                pytest checks (no API calls)
@@ -112,6 +148,7 @@ logs/                 call logs (not in git)
 - **Thinking is disabled** for all calls, so both systems run under identical settings.
 - **One data format for both datasets.** Every question lists its accepted answers and its gold paragraph for each hop; every paragraph has an ID made from its own text, so the same paragraph gets the same ID on any machine.
 - **Corpora are measured, not estimated.** Each corpus is built for a target size (16K to 512K tokens) and checked with the exact token counter to be within 1% of it. Corpus files list paragraph IDs in prompt order, so the exact prompt text can always be rebuilt.
+- **The systems differ only in their documents.** Every system uses the same instructions and layout (instructions, documents, question). Long context sends the whole corpus, cached; RAG sends the top k paragraphs of the question's ranking; the closed-book baseline sends none. All of them answer the same questions, picked by `pick_questions()`.
 
 ## Data licenses
 
