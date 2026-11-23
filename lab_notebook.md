@@ -1,6 +1,6 @@
 # Lab notebook: Long Context vs. Retrieval, at Matched Cost
 
-## Part 1: Logging and cost model
+## Part 1 complete (2026-10-21): logging and cost model
 
 ### Decisions
 
@@ -61,10 +61,10 @@ At Q = 1 caching is worse than no cache; from Q = 2 it is cheaper, approaching 0
 | `lcvr/prices.py` | The frozen price sheet |
 | `lcvr/cost.py` | `call_cost()`: dollar cost of one logged call |
 | `tests/test_cost.py` | 7 pytest checks against hand-calculated costs, including both sides of the 100K boundary |
-| `check_cost.py` | Prices every call in the log and totals it |
+| `scripts/check_cost.py` | Prices every call in the log and totals it |
 | `tutorial/` | Learning and demo scripts (`demo_*.py` make real API calls) |
 
-## Datasets chosen: Weeks 1-2 complete
+## Datasets chosen (2026-10-22): Weeks 1-2 complete
 
 ### Decision
 
@@ -98,13 +98,73 @@ At Q = 1 caching is worse than no cache; from Q = 2 it is cheaper, approaching 0
 |---|---|---|
 | `musique_ans_v1.0_dev.jsonl` | Google Drive zip linked from https://github.com/StonyBrookNLP/musique (file `data/musique_ans_v1.0_dev.jsonl` inside) | CC BY 4.0 |
 | `2wiki_dev.json` (renamed from `dev.json`) | `data_ids_april7.zip` linked from https://github.com/Alab-NII/2wikimultihop (version with fixed sentence segmentation) | Apache-2.0 (repo) |
+| `2wiki_id_aliases.json` (renamed from `id_aliases.json`) | the same `data_ids_april7.zip` | Apache-2.0 (repo) |
 
-Later, for scoring 2Wiki: `id_aliases.json` from the same 2Wiki zip lists alternative answer spellings.
+## Step 4b complete (2026-11-22): common format and shared corpora
+
+### Decisions
+
+- **One common format** for both datasets, written to `data/processed/` by `scripts/convert_data.py`:
+  - `<dataset>_questions.jsonl`: `qid`, `dataset`, `type`, `hops`, `question`, `answers` (gold answer first, then aliases), `gold_pids` (the gold paragraph of each hop, in hop order), `pids` (all of the question's paragraphs).
+  - `<dataset>_paragraphs.jsonl`: `pid`, `title`, `text`, each paragraph stored once.
+- **Paragraph IDs are hashes of title + text** (`mq_` or `2w_` + 12 hex digits of SHA-1). The same paragraph always gets the same ID, on any machine, so shared paragraphs are stored once and corpus files can list IDs instead of copying text.
+- **MuSiQue gold paragraphs per hop** come from `question_decomposition[i].paragraph_support_idx`, cross-checked against the `is_supporting` flags (all 2,417 questions agree).
+- **2Wiki gold paragraphs** come from the titles in `supporting_facts`. A question would be skipped only if a gold title pointed to two different paragraphs; none did.
+- **2Wiki answer aliases:** aliases + demonyms of the answer's Wikidata ID (`answer_id`) from `id_aliases.json`, the same rule as the official 2Wiki evaluator.
+- **One paragraph format in every prompt**, long-context and RAG alike: `# {title}` on one line, the text below, a blank line between paragraphs (`render_paragraph()` in `lcvr/corpus.py`).
+- **Corpus sizes N = 16,000 / 64,000 / 256,000 / 512,000 tokens**, measured with the API's token-counting endpoint (free, separate rate limit) as one user message.
+- **Corpus design**, per dataset and seed (3 seeds):
+  1. Sample 300 questions; the same 300 are used at every size, so differences across sizes can't come from different questions. Measure each one's paragraph set exactly.
+  2. At each size, split them into even groups (biggest first, each to the emptiest group with room) whose own paragraphs (gold + their own distractors) fill about 90%, at most 97%, of N.
+  3. Each group becomes one corpus: its paragraphs plus filler from questions outside the sample, shuffled with the corpus ID as seed, so gold paragraphs land at random positions.
+  4. Measure the corpus and adjust filler at the edge until it is within 1% of N.
+- **Corpus files** (`data/processed/corpora/<dataset>_seed<s>.jsonl`, one corpus per line) store paragraph IDs in prompt order, the questions it serves, and its measured size. The text is rebuilt with `render_corpus()`.
+
+### Findings
+
+**1. Conversion reproduced the October counts exactly.**
+
+| | MuSiQue-Ans dev | 2Wiki dev (kept types) |
+|---|---|---|
+| Questions | 2,417 | 6,785 |
+| Unique paragraphs | 21,100 | 24,434 |
+| Hops | 2: 1,252 / 3: 760 / 4: 405 | 2: 6,785 |
+| Questions with answer aliases | 680 | 4,422 |
+| Skipped | 0 | 0 |
+
+120 2Wiki questions list a title twice in their paragraphs, all harmless: either the same paragraph twice, or two different distractors with one title.
+
+**2. Haiku 5.5 uses many more tokens per character than the usual rule of thumb.** Measured on 400 random paragraphs per dataset: 2.78 characters per token (MuSiQue) and 2.56 (2Wiki), versus the ~4 often assumed. Paragraphs average 175 tokens (MuSiQue) and 234 (unique 2Wiki paragraphs); one question's full paragraph set is about 3,773 tokens (MuSiQue) and 1,641 (2Wiki). So a 16K corpus holds only about 4 MuSiQue questions' paragraph sets.
+
+**3. An average ratio can't size small groups.** Text with many numbers or non-English names takes more tokens than the average predicts. The first build packed a 16K group by estimate, and it measured 16,325 tokens with no filler at all; the size check caught it. The fix was to measure instead of estimating where it matters: each sampled question's paragraphs once before grouping, and each corpus's question paragraphs once before adjusting filler. (Finding 4 of Part 1 again: measure tokens, never estimate them.)
+
+**4. The corpora** (ranges over the 3 seeds; 470 corpora in total). Every corpus measured within 1% of its size.
+
+| Size | MuSiQue: corpora, questions each | 2Wiki: corpora, questions each | Filler share of paragraphs |
+|---|---|---|---|
+| 16K | 79-82, 3-5 | 34, 7-12 | 12-18% |
+| 64K | 20-21, 14-16 | 9, 31-37 | 15-26% |
+| 256K | 5-6, 49-62 | 3, 96-107 | 21-48% |
+| 512K | 3, 96-107 | 2, 142-158 | 34-63% |
+
+**5. Cost estimate for the runs ahead** (frozen prices, still current on 2026-11-22): about $80 for long context on every corpus (512K about $51, 256K about $27), about $44 for RAG if it has 10 configurations (top-k 5/10/20/40/80, reranker on/off), and about $2 for the pilot and closed-book baseline: about $126 in total. The pilot checks this against the real bill first. Sending RAG calls through the Batch API (50% off) would save about $22.
+
+### Code added
+
+| File | Purpose |
+|---|---|
+| `lcvr/data.py` | Converts both datasets to the common format, with integrity checks |
+| `lcvr/corpus.py` | Paragraph format, corpus building, and corpus checks |
+| `lcvr/llm.py` | New `count_tokens()`: exact token count of a text (free; not logged) |
+| `scripts/convert_data.py` | Writes `data/processed/` from `data/raw/` |
+| `scripts/calibrate_tokens.py` | Measures characters per token for each dataset |
+| `scripts/build_corpora.py` | Builds and checks all corpora (resumable: existing files are skipped) |
+| `tests/test_data.py`, `tests/test_corpus.py` | 16 new checks with made-up data and a fake token counter (23 in total) |
 
 ## Status
 
-Weeks 1-2 of the proposal timeline are complete: model chosen, repo, per-call logging, frozen price sheet, cost model with tests, datasets chosen and inspected.
+Weeks 1-2 are complete, and step 4b of Weeks 3-5: both datasets are in one format, and all corpora are built and checked.
 
-### Next (Weeks 3-5)
+### Next (rest of Weeks 3-5)
 
-Step 4b: convert both datasets to one common format and build the shared corpora at 16K / 64K / 256K / 512K tokens, with exact token counts.
+Scoring (exact match and F1 over all accepted answers), the long-context pipeline, the RAG pipeline, the closed-book baseline, then the 20-question pilot at 16K and 256K to check predicted cost against the real bill.

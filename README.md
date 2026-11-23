@@ -10,7 +10,7 @@ We compare two ways of answering questions about a document collection with an L
 
 Both use the same model (Claude Haiku 5.5). We compare them at **equal dollar cost per question**, across corpus size and query volume, on multi-hop questions from MuSiQue and 2WikiMultihopQA.
 
-**Status:** Weeks 1-2 done (model, logging, price sheet, cost model, dataset choice). Next: building the corpora and the two pipelines. Decisions and findings so far are in [`lab_notebook.md`](lab_notebook.md).
+**Status:** Weeks 1-2 done (model, logging, price sheet, cost model, dataset choice), and the shared corpora are built (step 4b). Next: scoring, the two pipelines, and a 20-question pilot. Decisions and findings so far are in [`lab_notebook.md`](lab_notebook.md).
 
 ## Setup
 
@@ -52,12 +52,13 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 ### 3. Download the datasets
 
-Datasets are not stored in git. Download them from the official sources and keep only these two files:
+Datasets are not stored in git. Download them from the official sources and keep only these three files:
 
 | Save as | Where to get it |
 |---|---|
 | `data/raw/musique_ans_v1.0_dev.jsonl` | The Google Drive zip linked from [StonyBrookNLP/musique](https://github.com/StonyBrookNLP/musique). Inside the zip, copy `data/musique_ans_v1.0_dev.jsonl`. |
 | `data/raw/2wiki_dev.json` | `data_ids_april7.zip` linked from [Alab-NII/2wikimultihop](https://github.com/Alab-NII/2wikimultihop). Inside the zip, copy `dev.json` and rename it. |
+| `data/raw/2wiki_id_aliases.json` | The same `data_ids_april7.zip`. Copy `id_aliases.json` and rename it. |
 
 Delete the zips afterwards; we only use the dev splits.
 
@@ -66,25 +67,40 @@ Delete the zips afterwards; we only use the dev splits.
 Run these from the repo folder:
 
 ```bash
-pytest                          # cost-model tests; free, no API calls. Expect "7 passed"
-python python -m scripts.dataset_stats         # dataset counts; should match the table in lab_notebook.md
+pytest                          # free, no API calls. Expect "23 passed"
+python -m scripts.dataset_stats  # dataset counts; should match the table in lab_notebook.md
 python -m tutorial.demo_llm     # one real API call pair; costs under $0.001
 ```
+
+### 5. Build the processed data and the corpora
+
+```bash
+python -m scripts.convert_data   # both datasets -> data/processed/ (seconds, free)
+python -m scripts.build_corpora  # all corpora -> data/processed/corpora/ (minutes; free token counting only)
+```
+
+`build_corpora` skips files that already exist, so after a crash just run it again. `scripts/calibrate_tokens.py` measured the characters-per-token ratios used by the corpus builder; you don't need to rerun it.
 
 ## Repo layout
 
 ```
 lcvr/                 project code
-  llm.py              call_claude(): every model call goes through here (caching, retries, logging)
+  llm.py              call_claude(): every model call goes through here (caching, retries, logging);
+                      count_tokens(): exact token count of a text (free)
   prices.py           frozen price sheet (date and source inside)
   cost.py             call_cost(): dollar cost of one logged call
+  data.py             converts both datasets to one common format
+  corpus.py           how paragraphs look in a prompt; builds and checks the corpora
+scripts/              things you run: python -m scripts.<name>
+  convert_data.py     data/raw/ -> data/processed/
+  calibrate_tokens.py measures characters per token for each dataset
+  build_corpora.py    builds every corpus (2 datasets x 3 seeds x 4 sizes)
+  check_cost.py       prices every call in logs/calls.jsonl and totals it
+  dataset_stats.py    counts questions, hops and text in each dataset
 tests/                pytest checks (no API calls)
 tutorial/             learning and demo scripts; demo_*.py make real API calls
 lab_notebook.md       decisions, findings, data sources
-scripts/              things you run: python -m scripts.<name>
-  check_cost.py       prices every call in logs/calls.jsonl and totals it
-  dataset_stats.py    counts questions, hops and text in each dataset
-data/                 datasets (not in git)
+data/                 raw and processed data, corpora (not in git)
 logs/                 call logs (not in git)
 ```
 
@@ -94,6 +110,8 @@ logs/                 call logs (not in git)
 - **We log tokens, not dollars.** `lcvr/cost.py` turns token counts into dollars using the frozen price sheet in `lcvr/prices.py`, so runs can be re-priced without re-running them.
 - **Runs are resumable.** `load_done_keys()` returns the label combinations that already succeeded; scripts skip those, so a crashed run can simply be started again.
 - **Thinking is disabled** for all calls, so both systems run under identical settings.
+- **One data format for both datasets.** Every question lists its accepted answers and its gold paragraph for each hop; every paragraph has an ID made from its own text, so the same paragraph gets the same ID on any machine.
+- **Corpora are measured, not estimated.** Each corpus is built for a target size (16K to 512K tokens) and checked with the exact token counter to be within 1% of it. Corpus files list paragraph IDs in prompt order, so the exact prompt text can always be rebuilt.
 
 ## Data licenses
 
