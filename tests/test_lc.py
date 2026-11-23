@@ -1,5 +1,6 @@
-"""Checks for the long-context system (lcvr/lc.py) and log reading, with a fake model: no API calls."""
+"""Checks for the long-context system (lcvr/lc.py) and logging, with a fake model: no API calls."""
 import json
+import threading
 
 from lcvr import lc, llm
 from lcvr.llm import label_key
@@ -50,3 +51,19 @@ def test_log_reading_skips_half_written_lines(tmp_path, monkeypatch):
     monkeypatch.setattr(llm, "LOG_FILE", log)
     assert [r["key"] for r in llm.read_log()] == ["a", "c"]
     assert llm.load_done_keys() == {"a"}                            # only successful calls count
+
+
+def test_calls_finishing_at_the_same_time_dont_mix_their_log_lines(tmp_path, monkeypatch):
+    monkeypatch.setattr(llm, "LOG_FILE", tmp_path / "calls.jsonl")
+    big = "x" * 5000                                                # long lines are easier to mix up
+
+    def write_many(worker):
+        for i in range(50):
+            llm.save_to_log({"key": f"{worker}-{i}", "ok": True, "answer": big})
+
+    threads = [threading.Thread(target=write_many, args=(w,)) for w in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(llm.read_log()) == 400                               # every line still whole

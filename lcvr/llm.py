@@ -1,5 +1,6 @@
 """One function for every model call in the project: call_claude()."""
 import json
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +15,7 @@ LOG_FILE = Path("logs") / "calls.jsonl"
 RETRYABLE_STATUS_CODES = (429, 500, 502, 503, 504, 529)
 
 client = anthropic.Anthropic(max_retries=0)   # no silent retries, we do our own
+log_lock = threading.Lock()                   # calls may run in parallel; only one writes at a time
 
 
 def now_utc():
@@ -30,12 +32,13 @@ def ends_with_newline(path):
 
 
 def save_to_log(record):
-    LOG_FILE.parent.mkdir(exist_ok=True)      # create the logs/ folder if it's missing
-    needs_newline = not ends_with_newline(LOG_FILE)
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        if needs_newline:                     # a crash left a half-written line: close it off
-            f.write("\n")
-        f.write(json.dumps(record) + "\n")
+    with log_lock:                            # two calls finishing together can't mix their lines
+        LOG_FILE.parent.mkdir(exist_ok=True)  # create the logs/ folder if it's missing
+        needs_newline = not ends_with_newline(LOG_FILE)
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            if needs_newline:                 # a crash left a half-written line: close it off
+                f.write("\n")
+            f.write(json.dumps(record) + "\n")
 
 
 def label_key(labels):

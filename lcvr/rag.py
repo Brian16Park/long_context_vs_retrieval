@@ -1,14 +1,18 @@
-"""Retrieval (RAG): turn paragraphs and questions into vectors, then find the closest paragraphs.
+"""The RAG system: find the paragraphs closest to a question, then answer from the top k.
 
-All of this runs locally (on the GPU if PyTorch can use one, otherwise the CPU), so it
-costs no API money. The cost model prices it as machine time instead (proposal section 4),
-which is why the scripts measure it and record which device did the work.
+Retrieval (embedding, search, reranking) runs locally, on the GPU if PyTorch can use one,
+otherwise the CPU, so it costs no API money. The cost model prices it as machine time
+instead (proposal section 4), which is why the scripts measure it and record the device.
+Answering is an API call, priced like any other.
 """
+import json
 from pathlib import Path
 
 import numpy as np
 
-from lcvr.corpus import render_paragraph
+from lcvr.corpus import render_corpus, render_paragraph
+from lcvr.llm import call_claude
+from lcvr.prompts import INSTRUCTIONS, MAX_ANSWER_TOKENS, question_text
 
 EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"      # small (33M parameters); 384 numbers per vector
 # BGE's recommended instruction in front of short search queries (paragraphs get none)
@@ -16,6 +20,9 @@ QUERY_PROMPT = "Represent this sentence for searching relevant passages: "
 
 RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L6-v2"   # small model trained to rank search results
 CANDIDATES = 100     # paragraphs the reranker looks at: enough for the largest top-k we use (80)
+
+# Every RAG setting we try: how many paragraphs go in the prompt, and whether they're reranked
+RAG_CONFIGS = [(k, reranked) for k in (5, 10, 20, 40, 80) for reranked in (False, True)]
 
 
 def pick_device():
@@ -87,3 +94,49 @@ def recall(ranking, gold_pids, k):
     """Share of the gold paragraphs found in the first k of `ranking`."""
     gold = set(gold_pids)
     return len(gold & set(ranking[:k])) / len(gold)
+
+
+def read_rankings(path):
+    """Rankings saved by scripts/rank.py (a line cut off by Ctrl+C is skipped)."""
+    rankings = []
+    path = Path(path)
+    if path.exists():
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    rankings.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    return rankings
+
+
+# ---------------- answering ----------------
+
+def rag_labels(ranking, dataset, seed, run, k, reranked):
+    return {
+        "run": run,
+        "system": "rag",
+        "dataset": dataset,
+        "seed": seed,
+        "corpus_tokens": ranking["corpus_tokens"],
+        "corpus_id": ranking["corpus_id"],
+        "question_id": ranking["qid"],
+        "k": k,
+        "reranked": reranked,
+    }
+
+
+def rag_documents(ranking, k, reranked, paragraphs_by_pid):
+    """The top k paragraphs of a question's ranking, best first, as prompt text."""
+    order = ranking["reranked"] if reranked else ranking["dense"]
+    return render_corpus(paragraphs_by_pid[pid] for pid in order[:k])
+
+
+def ask_rag(ranking, k, reranked, question, paragraphs_by_pid, labels):
+    """One RAG answer: the same instructions and layout as long context, with fewer documents.
+
+    No caching: each question gets its own documents, so there is nothing to reuse.
+    """
+    documents = rag_documents(ranking, k, reranked, paragraphs_by_pid)
+    return call_claude(question_text(question), labels, context=documents,
+                       system=INSTRUCTIONS, max_tokens=MAX_ANSWER_TOKENS)

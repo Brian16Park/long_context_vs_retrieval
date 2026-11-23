@@ -28,6 +28,13 @@ def call_cost(record, prices=HAIKU_5_5):
     return dollars
 
 
+def call_estimate(input_tokens, output_tokens, prices=HAIKU_5_5):
+    """Rough cost of one uncached call, before running it."""
+    tier = "long" if input_tokens > prices["long_prompt_threshold"] else "short"
+    p = prices[tier]
+    return (input_tokens * p["input"] + output_tokens * p["output"]) / 1_000_000
+
+
 def lc_estimate(corpus_tokens, n_questions, prices=HAIKU_5_5):
     """Rough cost of asking n questions against one cached corpus, before running it:
     one cache write, then n - 1 cache reads. Leaves out the few question and answer tokens."""

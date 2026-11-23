@@ -5,7 +5,7 @@ so these tests check the code against arithmetic we understand.
 """
 import pytest
 
-from lcvr.cost import call_cost, lc_estimate
+from lcvr.cost import call_cost, call_estimate, lc_estimate
 
 def make_record(input_tokens=0, cache_write=0, cache_read=0, output=0, ok=True):
     """Build a fake log line with just the fields call_cost() needs."""
@@ -68,3 +68,10 @@ def test_lc_estimate_short_corpus():
 def test_lc_estimate_long_corpus():
     # 256,000 x (0.625 + 19 x 0.05) per million: one write, 19 reads at the long-prompt prices
     assert lc_estimate(256_000, 20) == pytest.approx(0.4032)
+
+
+def test_call_estimate():
+    # 5,000 x 0.10 + 10 x 0.50 per million (short prompt)
+    assert call_estimate(5_000, 10) == pytest.approx(0.000505)
+    # 120,000 x 0.50 + 10 x 2.50 per million (over 100K: long-prompt prices)
+    assert call_estimate(120_000, 10) == pytest.approx(0.060025)

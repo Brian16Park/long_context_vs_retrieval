@@ -21,7 +21,8 @@ from statistics import mean
 from lcvr.corpus import SIZES, pick_questions
 from lcvr.data import read_jsonl
 from lcvr.llm import ends_with_newline
-from lcvr.rag import CANDIDATES, describe_device, load_reranker, load_vectors, recall, rerank, top_k
+from lcvr.rag import (CANDIDATES, describe_device, load_reranker, load_vectors, read_rankings,
+                      recall, rerank, top_k)
 
 parser = argparse.ArgumentParser(description="Rank paragraphs for RAG.")
 parser.add_argument("--dataset", required=True, choices=["musique", "2wiki"])
@@ -34,20 +35,6 @@ PROCESSED = Path("data/processed")
 OUT = PROCESSED / "rankings" / f"{args.dataset}_seed{args.seed}.jsonl"
 OUT.parent.mkdir(parents=True, exist_ok=True)
 
-
-def read_rankings():
-    """Rankings saved so far (a line cut off by Ctrl+C is skipped)."""
-    rankings = []
-    if OUT.exists():
-        with open(OUT, encoding="utf-8") as f:
-            for line in f:
-                try:
-                    rankings.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-    return rankings
-
-
 questions = {q["qid"]: q for q in read_jsonl(PROCESSED / f"{args.dataset}_questions.jsonl")}
 paragraphs = {p["pid"]: p for p in read_jsonl(PROCESSED / f"{args.dataset}_paragraphs.jsonl")}
 corpora = read_jsonl(PROCESSED / "corpora" / f"{args.dataset}_seed{args.seed}.jsonl")
@@ -56,7 +43,7 @@ qids, q_vectors = load_vectors(PROCESSED / "embeddings" / f"{args.dataset}_quest
 p_row = {pid: i for i, pid in enumerate(pids)}
 q_row = {qid: i for i, qid in enumerate(qids)}
 
-done = {(r["corpus_id"], r["qid"]) for r in read_rankings()}
+done = {(r["corpus_id"], r["qid"]) for r in read_rankings(OUT)}
 work = [(corpus, qid)
         for size in args.size
         for corpus, chosen in pick_questions(corpora, size, args.questions)
@@ -98,7 +85,7 @@ if work:
         f.write(json.dumps(timing) + "\n")
 
 # ---------------- recall@k over everything ranked so far ----------------
-rankings = read_rankings()
+rankings = read_rankings(OUT)
 ks = (5, 10, 20, 40, 80)
 print(f"\nShare of gold paragraphs in the top k, {args.dataset} seed {args.seed} (dense / reranked):")
 print("   size " + "".join(f"{f'k={k}':>14}" for k in ks))

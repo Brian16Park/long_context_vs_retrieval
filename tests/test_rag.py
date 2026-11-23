@@ -1,7 +1,12 @@
-"""Checks for retrieval helpers (lcvr/rag.py), with fake models: no downloads."""
+"""Checks for the RAG system (lcvr/rag.py), with fake models: no downloads, no API calls."""
+import json
+
 import numpy as np
 
-from lcvr.rag import embed, load_vectors, recall, rerank, save_vectors, top_k
+from lcvr import rag
+from lcvr.prompts import INSTRUCTIONS
+from lcvr.rag import (embed, load_vectors, rag_documents, rag_labels, read_rankings, recall, rerank,
+                      save_vectors, top_k)
 
 
 def test_vectors_survive_saving_and_loading(tmp_path):
@@ -64,3 +69,35 @@ def test_rerank_scores_each_pair_only_once():
 def test_recall():
     assert recall(["a", "b", "c", "d"], ["b", "d"], k=2) == 0.5           # b found, d not yet
     assert recall(["a", "b", "c", "d"], ["b", "d"], k=4) == 1.0
+
+
+RANKING = {"corpus_id": "c1", "corpus_tokens": 16000, "qid": "q1",
+           "dense": ["p1", "p2", "p3"], "reranked": ["p3", "p1", "p2"]}
+
+
+def test_rag_documents_take_the_top_k_of_the_chosen_ranking():
+    assert rag_documents(RANKING, 2, False, PARAGRAPHS) == "# A\nred\n\n# B\nred blue"
+    assert rag_documents(RANKING, 1, True, PARAGRAPHS) == "# C\ngreen"
+
+
+def test_ask_rag_sends_the_documents_uncached_with_the_shared_instructions(monkeypatch):
+    seen = {}
+
+    def fake_call_claude(question, labels, **options):
+        seen.update(question=question, labels=labels, **options)
+        return "an answer", {}
+
+    monkeypatch.setattr(rag, "call_claude", fake_call_claude)
+    labels = rag_labels(RANKING, "musique", 0, "test", k=2, reranked=True)
+    rag.ask_rag(RANKING, 2, True, {"qid": "q1", "question": "What?"}, PARAGRAPHS, labels)
+    assert seen["question"] == "Question: What?"
+    assert seen["context"] == "# C\ngreen\n\n# A\nred"
+    assert seen.get("cache_context", False) is False                     # nothing to reuse
+    assert seen["system"] == INSTRUCTIONS
+    assert seen["labels"]["k"] == 2 and seen["labels"]["reranked"] is True
+
+
+def test_read_rankings_skips_a_cut_off_line(tmp_path):
+    path = tmp_path / "rankings.jsonl"
+    path.write_text(json.dumps(RANKING) + '\n{"corpus_id": "c2", "qi\n', encoding="utf-8")
+    assert [r["qid"] for r in read_rankings(path)] == ["q1"]
