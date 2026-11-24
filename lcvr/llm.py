@@ -46,12 +46,13 @@ def label_key(labels):
     return json.dumps(labels, sort_keys=True)
 
 
-def read_log():
-    """Every complete record in the log, oldest first."""
+def read_log(path=None):
+    """Every complete record in the log (logs/calls.jsonl unless `path`), oldest first."""
+    path = Path(path) if path else LOG_FILE
     records = []
-    if not LOG_FILE.exists():                 # no log yet
+    if not path.exists():                     # no log yet
         return records
-    with open(LOG_FILE, encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             try:
                 records.append(json.loads(line))
@@ -65,10 +66,30 @@ def load_done_keys():
     return {r["key"] for r in read_log() if r.get("ok") and "key" in r}
 
 
+def error_code(error):
+    """The API's own code for an error, e.g. "ramp_limit_exceeded", if its body has one."""
+    body = getattr(error, "body", None)
+    if not isinstance(body, dict):
+        return None
+    details = (body.get("error") or {}).get("details") or {}
+    return details.get("error_code")
+
+
+def retry_after(error):
+    """Seconds the API asked us to wait before trying again (its retry-after header), or 0."""
+    response = getattr(error, "response", None)
+    try:
+        return float(response.headers.get("retry-after", 0))
+    except (AttributeError, TypeError, ValueError):     # no response, or no usable number
+        return 0.0
+
+
 def is_retryable(error):
     if isinstance(error, anthropic.APIConnectionError):   # network problem or timeout
         return True
     if isinstance(error, anthropic.APIStatusError):        # the API answered with an error code
+        if error_code(error) == "enforced_spend_limit_reached":
+            return False              # the monthly spend cap: no retry helps until next month
         return error.status_code in RETRYABLE_STATUS_CODES
     return False
 
@@ -88,7 +109,7 @@ def count_tokens(text):
 
 
 def call_claude(question, labels, context=None, cache_context=False,
-                system=None, max_tokens=100, max_attempts=8):
+                system=None, max_tokens=100, max_attempts=12):
     """Ask Claude one question. Every attempt is logged with `labels`.
 
     question      : the question text (always goes last)
@@ -97,6 +118,8 @@ def call_claude(question, labels, context=None, cache_context=False,
     context       : optional document text placed before the question
     cache_context : True = ask the API to cache everything up to the end of the context
     system        : optional instructions (sent before everything else)
+    Temporary failures are retried, waiting 2, 4, 8, ... s (at most 60 s, or longer if the
+    API's retry-after header asks), up to max_attempts tries (12 is about 7 minutes).
     Returns (answer_text, log_record).
     """
     # Build the request: context first (optionally cached), question last
@@ -136,8 +159,9 @@ def call_claude(question, labels, context=None, cache_context=False,
             })
             if not is_retryable(error) or attempt == max_attempts:
                 raise
-            wait = min(2 ** attempt, 60)
-            print(f"  attempt {attempt} failed ({type(error).__name__}), retrying in {wait}s")
+            wait = max(min(2 ** attempt, 60), retry_after(error))   # rate limits say how long
+            print(f"  attempt {attempt} failed ({type(error).__name__}), retrying in {wait:.0f}s",
+                  flush=True)
             time.sleep(wait)
             continue
 

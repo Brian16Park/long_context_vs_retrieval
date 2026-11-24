@@ -220,10 +220,136 @@ At 512K even the top 80 miss 11-13% of gold paragraphs. Seeds agree within a few
 | `scripts/show_answers.py` | A run's replies next to the gold answers |
 | `tests/` | 24 new checks (47 in total), with fake models: no downloads or API calls |
 
+## Answer-format test (planned 2026-11-22)
+
+The pilot's low accuracy (finding 5 above) may come from answering multi-hop questions in one step. Before the core sweep we test a second prompt style on a small slice, and decide with a rule set before seeing the results.
+
+### Decisions
+
+- **Two prompt styles** (`lcvr/prompts.py`). `answer_only` is the pilot's. `reasoning` changes only the middle of the instructions: "First, in at most three short sentences, reason step by step and name the facts you use. Then, on a last line of its own, write 'Answer:' followed by only the answer..." Reply cap: 200 tokens (50 for answer-only). A run uses one style for every system, so the systems still differ only in their documents. The reasoning tokens are billed output and count in the matched cost.
+- **Reading the answer:** `clean_prediction()` now takes the text after the last "Answer:" label in the reply (the next line if the label stands alone), and the first line if there is no label. Answer-only replies score as before, unless a later line carries a label, which the prompt makes unlikely.
+- **Labels:** reasoning calls get `"prompt": "reasoning"`; answer-only calls get no new label, so the pilot's calls keep their keys.
+- **The test:** the pilot's 20 questions at 16K on both datasets, in the reasoning style: long context, RAG top 5 and top 20 without the reranker, and closed book. `scripts/compare_runs.py` compares it with the pilot call by call. Cost: about $0.06.
+- **Decision rule.** Switch the core sweep to `reasoning` if F1 over all long-context and RAG calls together rises by at least 0.05, and at most 5% of reasoning replies lack an "Answer:" line. Otherwise keep `answer_only`. If the format check fails, fix the cap or instructions first and rerun the test under a new run name. The bar is low on purpose: adopting reasoning needlessly costs about $5 over the whole sweep, while staying at the floor would blur every comparison.
+- **Caveat:** the 20 test questions are among the 300 evaluation questions per dataset. The choice is one yes/no, applied to every system alike, so the risk of fitting the test set is small.
+
+### Results (2026-11-23)
+
+The same calls, answer-only (the pilot) -> reasoning. 20 questions per row, one run each; sampling makes single runs noisy, so a difference under about 0.1 in one row means little.
+
+| F1 (EM) | MuSiQue | 2Wiki |
+|---|---|---|
+| Long context, 16K | 0.24 -> 0.53 (0.05 -> 0.40) | 0.40 -> 0.66 (0.30 -> 0.50) |
+| RAG, top 5 | 0.20 -> 0.40 (0.05 -> 0.30) | 0.66 -> 0.62 (0.65 -> 0.60) |
+| RAG, top 20 | 0.18 -> 0.53 (0.05 -> 0.40) | 0.57 -> 0.61 (0.45 -> 0.50) |
+| Closed book | 0.03 -> 0.04 (0.00 -> 0.00) | 0.16 -> 0.29 (0.15 -> 0.20) |
+
+(RAG rows: without the reranker.) **Decision: the full run uses `reasoning`.** Over all 120 long-context and RAG calls, F1 rose from 0.38 to 0.56 (EM 0.26 to 0.45), well over the 0.05 bar, and 4 of 160 reasoning replies (2.5%) had no "Answer:" line, under the 5% limit. The new way of reading answers left the pilot's scores unchanged.
+
+**1. The pilot's answer-only replies often weren't answer-only.** 7-10 of 20 MuSiQue replies per system hit the 50-token cap (2Wiki: 1-6 of 20), and replies averaged 12-32 tokens rather than a few words. So the pilot often scored the first line of an unfinished reply. Haiku 5.5 tends to explain a hard multi-hop answer even when told not to; the reasoning format lets it, then makes it end with a labeled answer. (This corrects the pilot's finding 5, which judged from two smoke-test replies.)
+
+**2. The answer format changes the comparison.** With answer-only, RAG top 5 beat long context on 2Wiki at 16K (F1 0.66 vs 0.40). With reasoning, long context ties or beats RAG on both datasets (MuSiQue 0.53 vs 0.40 and 0.53; 2Wiki 0.66 vs 0.62 and 0.61). Twenty questions make this a hint, not a result, but it is a point for the report: how the model is asked to answer can change which system looks better.
+
+**3. With room to reason, more retrieved text helps.** On MuSiQue, RAG top 20 (gold recall 0.97) beat top 5 (recall 0.66): F1 0.53 vs 0.40. With answer-only the two were level (0.18 vs 0.20).
+
+**4. Reasoning cost 12% more here** ($0.0503 -> $0.0565 for the long-context and RAG calls), all of it output: replies averaged 97-146 tokens instead of 12-32. The extra output is about the same for every call, so it weighs more on cheap calls: RAG top 5 cost 26-41% more, long context 7-10%. For the full run that is about $5.
+
+**5. The 200-token cap cut off 8 of 160 reasoning replies (5%)**, mostly MuSiQue (long context and closed book, 3 of 20 each). **Decision, made after seeing the test:** raise the cap to 400 for the full run. The rule didn't require it (the format check passed). The reason: if the model writes longer replies in bigger corpora, a cap that binds would cut off more long-context answers at large sizes and bias the size comparison. Billing counts only the tokens generated, so a higher cap costs only what longer replies actually use.
+
+### Code added
+
+| File | Purpose |
+|---|---|
+| `lcvr/prompts.py` | The `reasoning` style; `prompt_settings()`, `style_label()` |
+| `lcvr/scoring.py` | `clean_prediction()` reads the last "Answer:" label; `has_answer_label()` |
+| `lcvr/lc.py`, `lcvr/rag.py` | A `style` argument for the prompt and the labels |
+| `lcvr/cost.py` | `lc_estimate()` can count the reply tokens |
+| `scripts/run_*.py` | `--prompt` on every run script; `run_rag` also `--k` and `--reranker` |
+| `scripts/compare_runs.py` | Two runs side by side, on the calls they share |
+| `tests/` | 10 new checks (57 in total) |
+
+## Full-run preparation (2026-11-23)
+
+### Decisions
+
+- **Long context runs several corpora at once** (`--workers`, default 4). Each corpus's questions still go one after another, so each corpus is written to the cache once and read after that. Sizes run smallest first, so usage grows gradually.
+- **Rate limits** (checked 2026-11-23 for Haiku 5.5 on the Start tier): 2M input tokens per minute, which is what limits RAG (cache reads don't count toward it; cache writes do); 400K output tokens per minute and thousands of requests per minute, far above our use. New since October: *ramp limits*, which return 429 errors when usage rises sharply, even below those limits. New organizations can also start on a lower Evaluation tier.
+- **Retries:** wait at least as long as the API's retry-after header asks; never retry the monthly spend cap (nothing helps until the next month); 12 attempts (about 7 minutes) instead of 8, so an unattended run rides out rate limits instead of stopping. Ctrl+C stops a parallel long-context run within one call.
+- **Our tier:** the organization turned out to be on the Scale tier (10M input tokens per minute for Haiku 5.5), so RAG ran 16 calls at a time instead of 8.
+- **The full run** (run name `full`): reasoning prompt with the 400-token cap; long context on every corpus (7,200 calls), RAG in all 10 settings (72,000 calls, 8 at a time), closed book (1,800 calls). Estimated cost about $135: long context about $82, RAG about $52, closed book under $1. Estimated time 7-8 hours, mostly RAG: its roughly 500M input tokens can go through at most 2M per minute, so it needs at least 4 hours.
+
+### Code added
+
+| File | Purpose |
+|---|---|
+| `scripts/run_lc.py` | `--workers`: several corpora at once; every size and question by default |
+| `lcvr/lc.py` | `ask_corpus()` takes a `stop` signal |
+| `lcvr/llm.py` | Retries follow retry-after, skip the spend cap, try 12 times; `retry_after()`, `error_code()` |
+| `lcvr/prompts.py` | Reasoning reply cap: 400 tokens |
+| `tests/` | 5 new checks, including retries with a fake API (62 in total) |
+
+## Full run and analysis (2026-11-24)
+
+### The run
+
+- **81,000 calls answered:** long context 7,200, RAG 72,000, closed book 1,800. Billed $133.95 (long context $81.83, RAG $51.96, closed book $0.15) against an estimate of about $135. 3 failed attempts (2 connection errors, one 500), all retried.
+- **Running time:** long context about 2.6 hours (4 corpora at a time), RAG 68 minutes (16 calls at a time), closed book 30 minutes. The run stopped twice (once when the PC crashed) and was resumed each time; no answered call was asked again.
+- **Caching worked as the cost model assumes:** 465 of 470 corpora were written to the cache once and only read after that. The other 5 were in progress when the run stopped and were written a second time (+$0.32).
+- **The 400-token cap hardly mattered:** long-context replies cut off by it rose with corpus size, as feared, but stayed under 1% (2, 3, 8 and 14 of 1,800 from 16K to 512K); RAG 4 of 72,000; closed book 5 of 1,800. Long-context replies also grew longer with corpus size (MuSiQue: 142 to 166 tokens on average).
+
+### Decisions
+
+- **Analysis code:** `lcvr/analysis.py` (computations, 14 tests) and `scripts/analyze.py`, which writes `results/`: `summary.md` with every table, CSV files, and 5 figures (`lcvr/figures.py`). Everything comes from the log and `data/processed/`. An independent check (a scorer and cost arithmetic written separately) reproduced every accuracy and cost figure exactly.
+- **Units and intervals:** a question in one seed's corpora is one instance; each (dataset, size) has 900 (300 per seed x 3 seeds), answered by every system. 95% confidence intervals: bootstrap over instances, 2,000 resamples, within each seed. System comparisons are paired, on the same instances.
+- **Long context's cost at query volume Q** comes from the measured tokens (mean cached prefix of instructions + corpus, the question's uncached tokens, the reply). Q = 1 is priced without caching: a cache write costs 25% more than plain input, so a one-off question wouldn't use it.
+- **RAG's cost** is the API call as billed plus GPU time at $0.526 per hour (AWS g4dn.xlarge, one NVIDIA T4, on demand, us-east-1; checked 2026-11-24, in `lcvr/prices.py`): per question, embedding it, searching, and reranking the top 100 (if on); per corpus, embedding its paragraphs, spread over Q questions. The timings come from the RTX 3060 Ti, likely faster than a T4, so the GPU cost is a lower bound. It adds at most about 15% to a question's cost, except at Q = 1 in big corpora, where embedding the corpus is most of a cheap RAG setting's cost.
+- **Matching rule, as proposed:** in each (dataset, size, Q) cell, long context against the most accurate RAG setting that costs no more per question. A winner needs a paired 95% interval that excludes zero; otherwise it's a tie. Iso-accuracy: the cheapest RAG setting at least as accurate as long context. The best RAG setting is picked on the questions it is scored on, which slightly favors RAG; it is the largest affordable top-k in every cell, so the choice is predictable and the bias small.
+- **RAG error classes:** correct means exact match. A wrong answer is a reasoning failure (every gold paragraph was among the k sent), partial retrieval (some were), or a retrieval miss (none were).
+
+### Findings
+
+**1. Long context loses accuracy as the corpus grows; RAG loses less.** F1 from 16K to 512K tokens: long context 0.626 -> 0.461 (MuSiQue) and 0.702 -> 0.582 (2Wiki); RAG with the top 80 reranked 0.642 -> 0.569 and 0.717 -> 0.603. At 16K the two are level.
+
+**2. RAG gets better with every step up in k,** to 80 paragraphs (about 16-20K tokens), at every corpus size; the reranker helps more as corpora grow (MuSiQue 512K, top 20: 0.478 -> 0.532).
+
+**3. At matched cost, the winner depends on corpus size and reuse.**
+
+| Corpus | MuSiQue | 2Wiki |
+|---|---|---|
+| 16K | tie at Q = 1; LC from Q = 10 (+0.06 to +0.16 F1) | RAG at Q = 1 (+0.02); LC from Q = 10 (+0.06 to +0.16) |
+| 64K | RAG at Q = 1-10 (+0.05 to +0.06); tie from Q = 100 | tie at Q = 1-10; LC from Q = 100 (+0.03) |
+| 256K | RAG at every Q (+0.08) | tie at every Q |
+| 512K | RAG at every Q (+0.11) | tie at every Q |
+
+Long context wins where it is cheap: a small corpus read by many questions costs it $0.0002-0.0004 per question, so RAG has to compete with its top 5 or 10. From 256K up, the cheapest RAG setting that is as accurate as long context costs 0.3-8% as much per question.
+
+**4. Caching cuts long context's cost about 10x, which is not enough above the 100K price cliff.** At 512K a question costs $0.257 with no reuse and $0.026 at Q = 1,000 (MuSiQue); RAG with the top 80 reranked costs $0.0017-0.0027. At 16K with reuse, long context costs about as much as RAG with the top 5.
+
+**5. Small k fails at retrieval, large k at reasoning.** With the top 5, 80-83% (MuSiQue) and 63-79% (2Wiki) of wrong answers had some but not all of their gold paragraphs; missing all of them is rare (at most 3.3% of questions). With the top 80, most wrong answers had every gold paragraph in hand: 99% at 16K and 60% at 512K (MuSiQue). Partial retrieval grows with corpus size at every k.
+
+**6. Retrieval misses the later hops.** MuSiQue, top 20: the first hop's gold paragraph is found 93-99% of the time; the second hop's 61-89% and the fourth's 39-85%, falling as the corpus grows. Later hops are about entities the question never names. The reranker helps hops 3 and 4 in big corpora.
+
+**7. Many right answers come without all the gold paragraphs:** 17-19% of MuSiQue questions with the top 5. The model fills gaps from memory (closed book gets 14% of MuSiQue and 16% of 2Wiki exactly right) or doesn't need every hop.
+
+**8. The systems fail on different questions.** At 512K, 7% of MuSiQue questions are right only with long context and 17% only with RAG (2Wiki: 11% and 14%). A router that picked the right system for each question would beat both; that's an upper bound, not something we built.
+
+**9. Position (secondary): weak signs of lost-in-the-middle at 16K on MuSiQue.** F1 is 0.76 when every gold paragraph sits near an edge of the corpus and 0.57 when one sits in the middle; no consistent pattern at larger sizes or on 2Wiki. The near-edge bins are small (18-40 questions).
+
+**10. Closed book is far above the pilot's near-zero:** F1 0.226 (MuSiQue) and 0.268 (2Wiki). With room to reason, the model recalls more; the pilot measured 20 questions, answer-only.
+
+**11. Latency:** median 1.0-1.5 s per long-context call, rising slightly with corpus size thanks to caching; RAG 0.7-0.9 s, plus up to 0.2 s of reranking.
+
+### Caveats for the report
+
+- One model (Haiku 5.5) and one prompt style; one run per setting at the default temperature.
+- The bootstrap resamples questions, not corpora; questions in one corpus share context, so the intervals are a little narrow, most of all at 512K (2-3 corpora per seed).
+- Accuracy is measured once per setting; Q enters only through cost, since caching doesn't change the answers.
+- GPU time is priced from RTX 3060 Ti timings at a T4 rate.
+
 ## Status
 
-Weeks 1-5 are complete: data, corpora, scoring, both systems, the closed-book baseline, all rankings, and the 20-question pilot. The pipelines score answers end to end, and the cost model matches the bill.
+The experiment is complete: data, corpora, both systems, the closed-book baseline, the full run and its analysis (`results/`).
 
 ### Next
 
-Decide the answer format (open decision in finding 5), then the core sweep: every corpus size, 300 questions per size, 3 seeds, both datasets.
+The final report (Introduction, Methods, Results, Discussion and Conclusion) and the 5-15 minute Zoom presentation.

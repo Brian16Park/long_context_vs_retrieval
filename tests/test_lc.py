@@ -4,7 +4,7 @@ import threading
 
 from lcvr import lc, llm
 from lcvr.llm import label_key
-from lcvr.prompts import INSTRUCTIONS
+from lcvr.prompts import INSTRUCTIONS, MAX_ANSWER_TOKENS, MAX_REASONING_TOKENS, REASONING_INSTRUCTIONS
 
 CORPUS = {"corpus_id": "c1", "dataset": "musique", "seed": 0, "target_tokens": 16000,
           "qids": ["q1", "q2", "q3"], "pids": ["p1", "p2"]}
@@ -32,6 +32,7 @@ def test_asks_in_order_with_the_corpus_cached(monkeypatch):
     assert calls[0]["context"] == "# A\na\n\n# B\nb"           # the whole corpus, every time
     assert calls[0]["cache_context"] is True
     assert calls[0]["system"] == INSTRUCTIONS
+    assert calls[0]["max_tokens"] == MAX_ANSWER_TOKENS
     assert calls[1]["labels"]["question_id"] == "q2"
     assert calls[1]["labels"]["corpus_tokens"] == 16000
 
@@ -41,6 +42,37 @@ def test_skips_questions_already_answered(monkeypatch):
     done = {label_key(lc.lc_labels(CORPUS, "q1", "test"))}
     assert lc.ask_corpus(CORPUS, QUESTIONS, PARAGRAPHS, "test", done) == 2
     assert [c["labels"]["question_id"] for c in calls] == ["q2", "q3"]
+
+
+def test_answer_only_labels_are_unchanged():
+    # The smoke test and pilot were logged before prompt styles existed: they must still count as done
+    assert set(lc.lc_labels(CORPUS, "q1", "pilot")) == {"run", "system", "dataset", "seed",
+                                                         "corpus_tokens", "corpus_id", "question_id"}
+
+
+def test_reasoning_style(monkeypatch):
+    calls = fake_model(monkeypatch)
+    done = {label_key(lc.lc_labels(CORPUS, "q1", "test"))}         # q1 answered in answer-only style
+    asked = lc.ask_corpus(CORPUS, QUESTIONS, PARAGRAPHS, "test", done, limit=1, style="reasoning")
+    assert asked == 1                                              # ...which doesn't count for reasoning
+    assert calls[0]["system"] == REASONING_INSTRUCTIONS
+    assert calls[0]["max_tokens"] == MAX_REASONING_TOKENS
+    assert calls[0]["cache_context"] is True
+    assert calls[0]["labels"]["prompt"] == "reasoning"
+
+
+def test_stop_ends_a_corpus_before_its_next_question(monkeypatch):
+    stop = threading.Event()
+    asked = []
+
+    def fake_call_claude(question, labels, **options):     # another corpus fails during q1
+        asked.append(labels["question_id"])
+        stop.set()
+        return "an answer", {}
+
+    monkeypatch.setattr(lc, "call_claude", fake_call_claude)
+    assert lc.ask_corpus(CORPUS, QUESTIONS, PARAGRAPHS, "test", done=set(), stop=stop) == 1
+    assert asked == ["q1"]
 
 
 def test_log_reading_skips_half_written_lines(tmp_path, monkeypatch):

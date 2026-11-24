@@ -1,7 +1,7 @@
 """Checks for scoring (lcvr/scoring.py), against answers worked out by hand."""
 import pytest
 
-from lcvr.scoring import clean_prediction, normalize, score
+from lcvr.scoring import clean_prediction, has_answer_label, normalize, score
 
 
 def test_normalize():
@@ -38,3 +38,25 @@ def test_clean_prediction():
     assert clean_prediction("Answer: 1990\n\nBecause the film came out then.") == "1990"
     assert clean_prediction("**Answer:** Paris") == "Paris"
     assert clean_prediction("\n  Leonardo da Vinci  \n") == "Leonardo da Vinci"
+
+
+def test_reasoning_reply_is_scored_on_its_answer_line():
+    reply = ("The film was directed by Jane Doe.\n"
+             "Jane Doe was born in Lyon.\n"
+             "Answer: Lyon")
+    assert clean_prediction(reply) == "Lyon"
+    assert score(reply, ["Lyon"]) == (1.0, 1.0)
+
+
+def test_answer_label_variants():
+    assert clean_prediction("Some reasoning.\n**Final answer:** Lyon") == "Lyon"
+    assert clean_prediction("Some reasoning.\nAnswer:\nLyon") == "Lyon"              # answer on the next line
+    assert clean_prediction("So the city is Lyon. Answer: Lyon") == "Lyon"           # label mid-line
+    assert clean_prediction("To answer: find the director.\nAnswer: Lyon") == "Lyon"  # the last label counts
+
+
+def test_reply_without_a_label_is_scored_on_its_first_line():
+    # e.g. a reasoning reply cut off by the token cap before its answer line
+    reply = "Answering this needs the director.\nShe was born in"
+    assert not has_answer_label(reply)                       # "Answering" is not a label
+    assert clean_prediction(reply) == "Answering this needs the director."

@@ -33,3 +33,14 @@ HAIKU_5_5 = {
     # Batch API: 50% off. Applied later, only to calls we actually send through batch.
     "batch_multiplier": 0.50,
 }
+
+
+# Local GPU work for RAG (embedding the corpus, embedding each question, reranking) is priced
+# as GPU time at an on-demand cloud rate. Our timings come from an RTX 3060 Ti; this is the
+# common cloud instance with a comparable inference GPU (one NVIDIA T4). Added 2026-11-24.
+GPU = {
+    "instance": "AWS EC2 g4dn.xlarge (1x NVIDIA T4), on demand, us-east-1",
+    "dollars_per_hour": 0.526,
+    "date": "2026-11-24",
+    "source": "https://instances.vantage.sh/aws/ec2/g4dn.xlarge",
+}

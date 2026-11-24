@@ -10,7 +10,7 @@ We compare two ways of answering questions about a document collection with an L
 
 Both use the same model (Claude Haiku 5.5). We compare them at **equal dollar cost per question**, across corpus size and query volume, on multi-hop questions from MuSiQue and 2WikiMultihopQA.
 
-**Status:** Weeks 1-5 done: data, corpora, scoring, both systems, a closed-book baseline, and a 20-question pilot (the cost model matched the bill within about 1%). Next: the core sweep. Decisions and findings so far are in [`lab_notebook.md`](lab_notebook.md).
+**Status:** the experiment is done: 81,000 calls ($134), every corpus size, 3 seeds, both datasets. Results are in [`results/summary.md`](results/summary.md), with figures in [`results/figures/`](results/figures/); decisions and findings in [`lab_notebook.md`](lab_notebook.md). Next: the final report and presentation.
 
 ## Setup
 
@@ -77,7 +77,7 @@ Delete the zips afterwards; we only use the dev splits.
 Run these from the repo folder:
 
 ```bash
-pytest                          # free, no API calls. Expect "47 passed"
+pytest                          # free, no API calls. Expect "76 passed"
 python -m scripts.dataset_stats  # dataset counts; should match the table in lab_notebook.md
 python -m tutorial.demo_llm     # one real API call pair; costs under $0.001
 ```
@@ -107,6 +107,39 @@ python -m scripts.show_answers pilot     # replies next to the gold answers
 python -m scripts.check_cost             # total cost of everything logged
 ```
 
+Every run script takes `--prompt`: `answer_only` (the default, used in the pilot) or `reasoning` (up to three short sentences of reasoning, then a last line "Answer: ..."). `run_rag` can also run just some settings with `--k` and `--reranker`. `compare_runs` compares two runs on the calls they share (same system, corpus, question and setting), with no API calls. The answer-format test:
+
+```powershell
+foreach ($d in "musique", "2wiki") {
+  python -m scripts.run_lc --run reasoning-test --prompt reasoning --dataset $d --size 16000 --questions 20
+  python -m scripts.run_rag --run reasoning-test --prompt reasoning --dataset $d --size 16000 --questions 20 --k 5 20 --reranker no
+  python -m scripts.run_closed_book --run reasoning-test --prompt reasoning --dataset $d --size 16000 --questions 20
+}
+python -m scripts.compare_runs pilot reasoning-test
+```
+
+The full run: every corpus, all 300 questions per size, 3 seeds, both datasets, in the reasoning style (about $135 and 7-8 hours). Long context runs 4 corpora at once (`--workers`), each corpus's questions in order so it is cached once; RAG runs 8 calls at once. If a run stops (no credit left, a network outage), run the same commands again: answered calls are skipped.
+
+```powershell
+foreach ($d in "musique", "2wiki") { foreach ($s in 0, 1, 2) {
+  python -m scripts.run_lc --run full --prompt reasoning --dataset $d --seed $s --workers 4 --yes
+} }
+foreach ($d in "musique", "2wiki") { foreach ($s in 0, 1, 2) {
+  python -m scripts.run_rag --run full --prompt reasoning --dataset $d --seed $s --workers 8 --yes
+} }
+foreach ($d in "musique", "2wiki") { foreach ($s in 0, 1, 2) {
+  python -m scripts.run_closed_book --run full --prompt reasoning --dataset $d --seed $s --yes
+} }
+```
+
+## Analysis
+
+```powershell
+python -m scripts.analyze --run full
+```
+
+Reads the log and `data/processed/`, makes no API calls, and writes `results/`: `summary.md` (every table), CSV files, and the figures (`results/figures/`, needs matplotlib). It takes about 15 seconds. Each question's F1 and exact match are compared one to one across systems, with 95% confidence intervals bootstrapped over questions. Long context's cost is priced at Q = 1, 10, 100 and 1,000 questions per cached corpus from the measured tokens; RAG's adds GPU time at a cloud rate (`lcvr/prices.py`).
+
 ## Repo layout
 
 ```
@@ -118,22 +151,28 @@ lcvr/                 project code
   data.py             converts both datasets to one common format
   corpus.py           how paragraphs look in a prompt; builds and checks the corpora; pick_questions()
   scoring.py          exact match and F1, as the official evaluators score them
-  prompts.py          the instructions every system shares
+  prompts.py          the instructions every system shares, in two styles (answer only, brief reasoning)
   lc.py               long context: the whole corpus, cached, then each question
   rag.py              RAG: embeddings, search, reranking, then the top k paragraphs and the question
+  analysis.py         accuracy with confidence intervals, cost across Q, the matched-cost comparison,
+                      RAG errors split into retrieval misses and reasoning failures
+  figures.py          the result figures (matplotlib)
 scripts/              things you run: python -m scripts.<name>
   convert_data.py     data/raw/ -> data/processed/
   calibrate_tokens.py measures characters per token for each dataset
   build_corpora.py    builds every corpus (2 datasets x 3 seeds x 4 sizes)
   embed.py            embeds every paragraph and question once
   rank.py             dense and reranked top 100 for every question in its corpus; prints recall@k
-  run_lc.py           runs long context
+  run_lc.py           runs long context, several corpora at once
   run_rag.py          runs RAG (10 settings: top-k 5-80, with and without the reranker)
   run_closed_book.py  runs the no-documents baseline
   show_answers.py     a run's replies next to the gold answers
+  compare_runs.py     two runs side by side, on the calls they share (e.g. two prompt styles)
   check_cost.py       prices every call in logs/calls.jsonl and totals it
+  analyze.py          every table and figure of a finished run -> results/
   dataset_stats.py    counts questions, hops and text in each dataset
 tests/                pytest checks (no API calls)
+results/              tables and figures of the full run (from scripts/analyze.py)
 tutorial/             learning and demo scripts; demo_*.py make real API calls
 lab_notebook.md       decisions, findings, data sources
 data/                 raw and processed data, corpora (not in git)
@@ -148,7 +187,7 @@ logs/                 call logs (not in git)
 - **Thinking is disabled** for all calls, so both systems run under identical settings.
 - **One data format for both datasets.** Every question lists its accepted answers and its gold paragraph for each hop; every paragraph has an ID made from its own text, so the same paragraph gets the same ID on any machine.
 - **Corpora are measured, not estimated.** Each corpus is built for a target size (16K to 512K tokens) and checked with the exact token counter to be within 1% of it. Corpus files list paragraph IDs in prompt order, so the exact prompt text can always be rebuilt.
-- **The systems differ only in their documents.** Every system uses the same instructions and layout (instructions, documents, question). Long context sends the whole corpus, cached; RAG sends the top k paragraphs of the question's ranking; the closed-book baseline sends none. All of them answer the same questions, picked by `pick_questions()`.
+- **The systems differ only in their documents.** Every system uses the same instructions and layout (instructions, documents, question), and a run uses one prompt style for all of them. Long context sends the whole corpus, cached; RAG sends the top k paragraphs of the question's ranking; the closed-book baseline sends none. All of them answer the same questions, picked by `pick_questions()`.
 
 ## Data licenses
 

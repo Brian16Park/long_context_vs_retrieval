@@ -4,7 +4,7 @@ import json
 import numpy as np
 
 from lcvr import rag
-from lcvr.prompts import INSTRUCTIONS
+from lcvr.prompts import INSTRUCTIONS, MAX_ANSWER_TOKENS, MAX_REASONING_TOKENS, REASONING_INSTRUCTIONS
 from lcvr.rag import (embed, load_vectors, rag_documents, rag_labels, read_rankings, recall, rerank,
                       save_vectors, top_k)
 
@@ -93,8 +93,23 @@ def test_ask_rag_sends_the_documents_uncached_with_the_shared_instructions(monke
     assert seen["question"] == "Question: What?"
     assert seen["context"] == "# C\ngreen\n\n# A\nred"
     assert seen.get("cache_context", False) is False                     # nothing to reuse
-    assert seen["system"] == INSTRUCTIONS
+    assert seen["system"] == INSTRUCTIONS and seen["max_tokens"] == MAX_ANSWER_TOKENS
     assert seen["labels"]["k"] == 2 and seen["labels"]["reranked"] is True
+    assert "prompt" not in seen["labels"]                                # answer-only: labels as before
+
+
+def test_ask_rag_reasoning_style(monkeypatch):
+    seen = {}
+
+    def fake_call_claude(question, labels, **options):
+        seen.update(labels=labels, **options)
+        return "an answer", {}
+
+    monkeypatch.setattr(rag, "call_claude", fake_call_claude)
+    labels = rag_labels(RANKING, "musique", 0, "test", k=2, reranked=False, style="reasoning")
+    rag.ask_rag(RANKING, 2, False, {"qid": "q1", "question": "What?"}, PARAGRAPHS, labels, style="reasoning")
+    assert seen["system"] == REASONING_INSTRUCTIONS and seen["max_tokens"] == MAX_REASONING_TOKENS
+    assert seen["labels"]["prompt"] == "reasoning"
 
 
 def test_read_rankings_skips_a_cut_off_line(tmp_path):

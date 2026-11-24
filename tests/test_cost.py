@@ -70,6 +70,13 @@ def test_lc_estimate_long_corpus():
     assert lc_estimate(256_000, 20) == pytest.approx(0.4032)
 
 
+def test_lc_estimate_with_replies():
+    # 16,000 x (0.125 + 3 x 0.01) + 4 replies x 120 tokens x 0.50, all per million
+    assert lc_estimate(16_000, 4, output_tokens=120) == pytest.approx(0.00272)
+    # 256,000 x (0.625 + 19 x 0.05) + 20 x 120 x 2.50 (long-prompt prices for the replies too)
+    assert lc_estimate(256_000, 20, output_tokens=120) == pytest.approx(0.4092)
+
+
 def test_call_estimate():
     # 5,000 x 0.10 + 10 x 0.50 per million (short prompt)
     assert call_estimate(5_000, 10) == pytest.approx(0.000505)

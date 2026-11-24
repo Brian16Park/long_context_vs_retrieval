@@ -35,15 +35,32 @@ def f1(prediction, gold):
     return 2 * precision * recall / (precision + recall)
 
 
-def clean_prediction(reply):
-    """The model's reply -> just the answer: its first non-empty line, without an 'Answer:' label.
+# "Answer:" anywhere in a line, also "**Answer:**" or "Final answer:", but not "Answering"
+ANSWER_LABEL = re.compile(r"\banswer\W*?:", re.IGNORECASE)
 
-    The prompt asks for the answer alone; this only catches the common slips.
+
+def clean_prediction(reply):
+    """The model's reply -> just the answer.
+
+    Reasoning replies end with a line "Answer: ...", so if the reply has an "Answer:"
+    label, the answer is what follows the last one (or the next line, if the label stands
+    alone). Answer-only replies are the answer itself: their first non-empty line.
     """
     lines = [line.strip() for line in reply.splitlines() if line.strip()]
-    if not lines:
-        return ""
-    return re.sub(r"^\W*answer\W*:\W*", "", lines[0], flags=re.IGNORECASE).strip()
+    for i in reversed(range(len(lines))):
+        labels = list(ANSWER_LABEL.finditer(lines[i]))
+        if labels:
+            answer = re.sub(r"^\W+", "", lines[i][labels[-1].end():]).strip()
+            if not answer and i + 1 < len(lines):     # "Answer:" alone, the answer below it
+                answer = lines[i + 1]
+            return answer
+    return lines[0] if lines else ""
+
+
+def has_answer_label(reply):
+    """Does the reply contain an "Answer:" label? Reasoning replies without one were
+    usually cut off by the token cap, and get scored from their first line."""
+    return ANSWER_LABEL.search(reply) is not None
 
 
 def score(reply, answers):

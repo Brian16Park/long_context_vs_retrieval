@@ -12,7 +12,7 @@ import numpy as np
 
 from lcvr.corpus import render_corpus, render_paragraph
 from lcvr.llm import call_claude
-from lcvr.prompts import INSTRUCTIONS, MAX_ANSWER_TOKENS, question_text
+from lcvr.prompts import DEFAULT_STYLE, prompt_settings, question_text, style_label
 
 EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"      # small (33M parameters); 384 numbers per vector
 # BGE's recommended instruction in front of short search queries (paragraphs get none)
@@ -112,7 +112,7 @@ def read_rankings(path):
 
 # ---------------- answering ----------------
 
-def rag_labels(ranking, dataset, seed, run, k, reranked):
+def rag_labels(ranking, dataset, seed, run, k, reranked, style=DEFAULT_STYLE):
     return {
         "run": run,
         "system": "rag",
@@ -123,6 +123,7 @@ def rag_labels(ranking, dataset, seed, run, k, reranked):
         "question_id": ranking["qid"],
         "k": k,
         "reranked": reranked,
+        **style_label(style),
     }
 
 
@@ -132,11 +133,13 @@ def rag_documents(ranking, k, reranked, paragraphs_by_pid):
     return render_corpus(paragraphs_by_pid[pid] for pid in order[:k])
 
 
-def ask_rag(ranking, k, reranked, question, paragraphs_by_pid, labels):
+def ask_rag(ranking, k, reranked, question, paragraphs_by_pid, labels, style=DEFAULT_STYLE):
     """One RAG answer: the same instructions and layout as long context, with fewer documents.
 
     No caching: each question gets its own documents, so there is nothing to reuse.
+    `style` is the prompt style; make `labels` with the same one (rag_labels(..., style)).
     """
+    instructions, max_tokens = prompt_settings(style)
     documents = rag_documents(ranking, k, reranked, paragraphs_by_pid)
     return call_claude(question_text(question), labels, context=documents,
-                       system=INSTRUCTIONS, max_tokens=MAX_ANSWER_TOKENS)
+                       system=instructions, max_tokens=max_tokens)

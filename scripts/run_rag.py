@@ -2,9 +2,11 @@
 
 Run from the repo folder, for example:
   python -m scripts.run_rag --run pilot --dataset musique --size 16000 256000 --questions 20
+  python -m scripts.run_rag --run reasoning-test --prompt reasoning --dataset musique --size 16000 --questions 20 --k 5 20 --reranker no
 
 Tries every setting in RAG_CONFIGS (top-k 5, 10, 20, 40, 80, each with and without the
-reranker), so that's 10 calls per question. Needs the rankings from scripts/rank.py.
+reranker), so that's 10 calls per question; --k and --reranker pick fewer. --prompt picks
+the prompt style (default answer_only). Needs the rankings from scripts/rank.py.
 Shows a cost estimate and waits for "y" before spending anything. Every call is logged,
 so running the same command again skips calls already answered. Calls run --workers at
 a time (default 4). If a call fails for good (for example, no credit left), the calls
@@ -19,8 +21,9 @@ from lcvr.corpus import CHARS_PER_TOKEN, SIZES, estimate_sizes, pick_questions
 from lcvr.cost import call_cost, call_estimate
 from lcvr.data import read_jsonl
 from lcvr.llm import label_key, load_done_keys, read_log
+from lcvr.prompts import DEFAULT_STYLE, OUTPUT_ESTIMATE, STYLES
 from lcvr.rag import RAG_CONFIGS, ask_rag, rag_labels, read_rankings, recall
-from lcvr.scoring import score
+from lcvr.scoring import has_answer_label, score
 
 parser = argparse.ArgumentParser(description="Run the RAG system.")
 parser.add_argument("--run", required=True, help="a name for this run, e.g. pilot")
@@ -29,6 +32,11 @@ parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--size", type=int, nargs="+", default=list(SIZES), help="corpus sizes (default: all)")
 parser.add_argument("--questions", type=int, default=None, help="questions per size (default: all)")
 parser.add_argument("--workers", type=int, default=4, help="calls running at the same time")
+parser.add_argument("--prompt", choices=STYLES, default=DEFAULT_STYLE, help="prompt style (default: answer_only)")
+parser.add_argument("--k", type=int, nargs="+", choices=sorted({k for k, _ in RAG_CONFIGS}),
+                    help="only these top-k settings (default: all)")
+parser.add_argument("--reranker", choices=["both", "yes", "no"], default="both",
+                    help="with the reranker, without it, or both (default)")
 parser.add_argument("--yes", action="store_true", help="skip the confirmation question")
 args = parser.parse_args()
 
@@ -40,8 +48,10 @@ est = estimate_sizes(paragraphs, CHARS_PER_TOKEN[args.dataset])
 corpora = read_jsonl(PROCESSED / "corpora" / f"{args.dataset}_seed{args.seed}.jsonl")
 rankings = {(r["corpus_id"], r["qid"]): r
             for r in read_rankings(PROCESSED / "rankings" / f"{args.dataset}_seed{args.seed}.jsonl")}
+configs = [(k, reranked) for k, reranked in RAG_CONFIGS
+           if (args.k is None or k in args.k) and args.reranker in ("both", "yes" if reranked else "no")]
 
-# ---------------- plan: the same questions as every other system, 10 settings each ----------------
+# ---------------- plan: the same questions as every other system, in each chosen setting ----------------
 jobs, unranked = [], 0
 for size in args.size:
     for corpus, qids in pick_questions(corpora, size, args.questions):
@@ -50,14 +60,14 @@ for size in args.size:
             if ranking is None:
                 unranked += 1
                 continue
-            jobs += [(ranking, k, reranked) for k, reranked in RAG_CONFIGS]
+            jobs += [(ranking, k, reranked) for k, reranked in configs]
 if unranked:
     raise SystemExit(f"{unranked} of these questions have no ranking yet. Run scripts.rank first, "
                      "with the same --dataset, --seed, --size and --questions.")
 
 done = load_done_keys()
 todo = [(ranking, k, reranked) for ranking, k, reranked in jobs
-        if label_key(rag_labels(ranking, args.dataset, args.seed, args.run, k, reranked)) not in done]
+        if label_key(rag_labels(ranking, args.dataset, args.seed, args.run, k, reranked, args.prompt)) not in done]
 
 
 def input_estimate(ranking, k, reranked):
@@ -66,7 +76,7 @@ def input_estimate(ranking, k, reranked):
     return sum(est[pid] for pid in order[:k]) + 150
 
 
-estimate = sum(call_estimate(input_estimate(*job), output_tokens=10) for job in todo)
+estimate = sum(call_estimate(input_estimate(*job), OUTPUT_ESTIMATE[args.prompt]) for job in todo)
 print(f"{len(jobs)} calls planned, {len(todo)} still to do. Estimated cost: ${estimate:.4f}")
 if todo and not args.yes and input("Continue? [y/N] ").strip().lower() != "y":
     raise SystemExit("Stopped. Nothing was spent.")
@@ -75,8 +85,8 @@ if todo and not args.yes and input("Continue? [y/N] ").strip().lower() != "y":
 # ---------------- run ----------------
 def answer(job):
     ranking, k, reranked = job
-    labels = rag_labels(ranking, args.dataset, args.seed, args.run, k, reranked)
-    return ask_rag(ranking, k, reranked, questions[ranking["qid"]], paragraphs_by_pid, labels)
+    labels = rag_labels(ranking, args.dataset, args.seed, args.run, k, reranked, args.prompt)
+    return ask_rag(ranking, k, reranked, questions[ranking["qid"]], paragraphs_by_pid, labels, args.prompt)
 
 
 with ThreadPoolExecutor(max_workers=args.workers) as executor:
@@ -94,11 +104,12 @@ with ThreadPoolExecutor(max_workers=args.workers) as executor:
 # ---------------- results of this run, from the log ----------------
 records = [r for r in read_log()
            if r.get("ok") and r.get("run") == args.run and r.get("system") == "rag"
-           and r.get("dataset") == args.dataset and r.get("seed") == args.seed]
-print(f"\nRAG, {args.dataset} seed {args.seed}, run '{args.run}':")
+           and r.get("dataset") == args.dataset and r.get("seed") == args.seed
+           and r.get("prompt", DEFAULT_STYLE) == args.prompt]
+print(f"\nRAG, {args.dataset} seed {args.seed}, run '{args.run}', prompt {args.prompt}:")
 print("   size    k  reranker  answers    EM    F1  recall  avg prompt tokens      cost")
 for size in args.size:
-    for k, reranked in RAG_CONFIGS:
+    for k, reranked in configs:
         rows = [r for r in records if r["corpus_tokens"] == size and r["k"] == k and r["reranked"] == reranked]
         if not rows:
             continue
@@ -108,3 +119,7 @@ for size in args.size:
         print(f"   {size // 1000:>3}K  {k:>3}  {'yes' if reranked else 'no':<8}  {len(rows):>7}  "
               f"{mean(s[0] for s in scores):.2f}  {mean(s[1] for s in scores):.2f}  {found:>6.2f}  "
               f"{mean(r['input_tokens'] for r in rows):>17,.0f}  ${sum(call_cost(r) for r in rows):.4f}")
+if args.prompt == "reasoning":
+    cut_off = sum(r["stop_reason"] == "max_tokens" for r in records)
+    unlabeled = sum(not has_answer_label(r["answer"]) for r in records)
+    print(f"Replies cut off by the token cap: {cut_off}, with no 'Answer:' line: {unlabeled} (of {len(records)})")
